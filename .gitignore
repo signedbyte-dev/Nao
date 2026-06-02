@@ -1,0 +1,12 @@
+.paket
+paket-files
+
+bin
+Bin
+obj
+Obj
+debug
+Debug
+.fake
+
+TestResults
