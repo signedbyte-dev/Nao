@@ -11,14 +11,11 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src/MSTestSettings.fs" />
-    <Compile Include="src/Test1.fs" />
-    <Compile Include="src/ConversationWindowTests.fs" />
-    <Compile Include="src/MemoryStoreTests.fs" />
-    <Compile Include="src/SummarizerTests.fs" />
-    <Compile Include="src/SemanticMemoryTests.fs" />
+    <Compile Include="src/EvaluatorTests.fs" />
+    <Compile Include="src/EvalRunnerTests.fs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Nao.Agents\Nao.Agents.fsproj" />
+    <ProjectReference Include="..\..\src\Nao.Eval\Nao.Eval.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

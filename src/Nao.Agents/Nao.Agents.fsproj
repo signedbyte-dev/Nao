@@ -18,10 +18,17 @@
     <Compile Include="src/Logging/LogLevel.fs" />
     <Compile Include="src/Logging/LogEntry.fs" />
     <Compile Include="src/Logging/AgentLogger.fs" />
+    <Compile Include="src/Core/AgentEvent.fs" />
+    <Compile Include="src/Core/AgentEventSink.fs" />
     <Compile Include="src/Core/IAgent.fs" />
+    <Compile Include="src/Memory/ConversationWindow.fs" />
+    <Compile Include="src/Memory/MemoryStore.fs" />
+    <Compile Include="src/Memory/Summarizer.fs" />
+    <Compile Include="src/Memory/SemanticMemory.fs" />
     <Compile Include="src/Orchestration/Router.fs" />
     <Compile Include="src/Orchestration/Pipeline.fs" />
     <Compile Include="src/Orchestration/AgentGroup.fs" />
+    <Compile Include="src/Orchestration/Orchestrator.fs" />
     <Compile Include="src/Harness/HarnessResult.fs" />
     <Compile Include="src/Harness/HarnessConfig.fs" />
     <Compile Include="src/Harness/AgentHarness.fs" />

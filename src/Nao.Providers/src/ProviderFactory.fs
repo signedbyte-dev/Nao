@@ -18,6 +18,8 @@ module ProviderFactory =
                 member _.Name = "Anthropic"
                 member _.CompleteAsync _conversation _options =
                     Task.FromResult { Content = ""; FinishReason = "stop"; TokensUsed = None } }
+        | Ollama config ->
+            OllamaProvider(config) :> ILlmProvider
         | Vllm _config ->
             { new ILlmProvider with
                 member _.Name = "vLLM"

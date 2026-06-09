@@ -4,5 +4,6 @@ namespace Nao.Providers
 type ProviderType =
     | OpenAI of OpenAIConfig
     | Anthropic of AnthropicConfig
+    | Ollama of OllamaConfig
     | Vllm of VllmConfig
     | LlamaCpp of LlamaCppConfig

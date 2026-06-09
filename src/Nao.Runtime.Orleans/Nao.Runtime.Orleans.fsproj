@@ -8,6 +8,7 @@
     <Compile Include="src/Serialization/FSharpSerialization.fs" />
     <Compile Include="src/Grains/IAgentGrain.fs" />
     <Compile Include="src/Grains/AgentGrainBase.fs" />
+    <Compile Include="src/Grains/StatefulAgentGrain.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Nao.Agents\Nao.Agents.fsproj" />
