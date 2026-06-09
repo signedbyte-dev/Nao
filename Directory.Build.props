@@ -1,5 +1,9 @@
 <Project>
   <PropertyGroup>
     <NoWarn>$(NoWarn);NU1510</NoWarn>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RepositoryUrl>https://github.com/nao-agents/nao</RepositoryUrl>
+    <FsDocsLicenseLink>https://github.com/nao-agents/nao/blob/main/LICENSE</FsDocsLicenseLink>
+    <FsDocsReleaseNotesLink>https://github.com/nao-agents/nao/blob/main/CHANGELOG.md</FsDocsReleaseNotesLink>
   </PropertyGroup>
 </Project>

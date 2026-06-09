@@ -10,3 +10,7 @@ Debug
 .fake
 
 TestResults
+
+# Generated documentation output
+docs/output
+.fsdocs

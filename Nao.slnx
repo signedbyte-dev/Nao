@@ -3,6 +3,7 @@
     <Project Path="src/Nao.Agents/Nao.Agents.fsproj" />
     <Project Path="src/Nao.Core/Nao.Core.fsproj" />
     <Project Path="src/Nao.Eval/Nao.Eval.fsproj" />
+    <Project Path="src/Nao.Loader/Nao.Loader.fsproj" />
     <Project Path="src/Nao.Providers/Nao.Providers.fsproj" />
     <Project Path="src/Nao.Runtime.Orleans/Nao.Runtime.Orleans.fsproj" />
   </Folder>
@@ -11,6 +12,7 @@
     <Project Path="tests/Nao.Core.Tests/Nao.Core.Tests.fsproj" />
     <Project Path="tests/Nao.E2E.Tests/Nao.E2E.Tests.fsproj" />
     <Project Path="tests/Nao.Eval.Tests/Nao.Eval.Tests.fsproj" />
+    <Project Path="tests/Nao.Loader.Tests/Nao.Loader.Tests.fsproj" />
     <Project Path="tests/Nao.Providers.Tests/Nao.Providers.Tests.fsproj" />
     <Project Path="tests/Nao.Runtime.Orleans.Tests/Nao.Runtime.Orleans.Tests.fsproj" />
   </Folder>

@@ -64,32 +64,33 @@ type EndToEndAgentTests () =
         Assert.AreEqual("coordinator", reply.Value.To.Value.Name)
 
 [<TestClass>]
-type EndToEndGrainTests () =
+type EndToEndWorkspaceTests () =
 
     [<TestMethod>]
-    member _.GrainProcessDelegatesToAgentPipeline () =
-        let grain = DemoAgentGrain() :> IAgentGrain
-        let result = grain.ProcessAsync("What is the weather in Berlin?").Result
+    member _.WorkspaceAgentProcessesToolCall () =
+        let agent = DemoWorkspace.createAgent ()
+        let result = agent.RunAsync("What is the weather in Berlin?").Result
         Assert.IsTrue(result.Contains("18°C"), sprintf "Expected weather, got: %s" result)
 
     [<TestMethod>]
-    member _.GrainCalculatorToolWorks () =
-        let grain = DemoAgentGrain() :> IAgentGrain
-        let result = grain.ProcessAsync("calculate 2 + 2 for me").Result
+    member _.WorkspaceAgentUsesCalculator () =
+        let agent = DemoWorkspace.createAgent ()
+        let result = agent.RunAsync("calculate 2 + 2 for me").Result
         Assert.IsTrue(result.Contains("4"), sprintf "Expected '4', got: %s" result)
 
     [<TestMethod>]
-    member _.GrainReceiveMessageProcessesToolCall () =
-        let grain = DemoAgentGrain() :> IAgentGrain
-        let result = (grain.ReceiveMessageAsync "other-agent" "weather in London please").Result
-        Assert.IsTrue(result.IsSome)
-        Assert.IsTrue(result.Value.Contains("18°C"))
+    member _.WorkspaceResolvesTool () =
+        let tool = DemoWorkspace.definitions.Tools |> List.tryFind (fun t -> t.Name = "get_weather")
+        Assert.IsTrue(tool.IsSome)
+        Assert.AreEqual("get_weather", tool.Value.Name)
 
     [<TestMethod>]
-    member _.GrainReturnsAgentId () =
-        let grain = DemoAgentGrain() :> IAgentGrain
-        let name = grain.GetAgentIdAsync().Result
-        Assert.AreEqual("demo-agent", name)
+    member _.EachAgentInstanceIsIsolated () =
+        let a1 = DemoWorkspace.createAgent ()
+        let a2 = DemoWorkspace.createAgent ()
+        let _ = a1.RunAsync("hello").Result
+        Assert.IsTrue(a1.State.Conversation.Length > 0)
+        Assert.AreEqual(0, a2.State.Conversation.Length)
 
 [<TestClass>]
 type EndToEndToolTests () =

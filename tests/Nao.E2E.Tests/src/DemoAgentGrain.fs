@@ -64,16 +64,23 @@ type DemoAgent(provider: ILlmProvider, tools: Tool list, prompt: Prompt) =
             let reply = AgentMessage.create id msg.From response
             Task.FromResult(Some reply)
 
-/// Orleans grain wrapping the DemoAgent
-type DemoAgentGrain() =
-    inherit AgentGrainBase()
-
-    let provider = LocalLlmProvider() :> ILlmProvider
-    let tools = [ DemoTools.getWeather; DemoTools.calculator; DemoTools.greeter ]
-    let prompt =
+/// Test workspace definitions that provide DemoAgent via built agents/tools
+module DemoWorkspace =
+    let private provider = LocalLlmProvider() :> ILlmProvider
+    let private tools = [ DemoTools.getWeather; DemoTools.calculator; DemoTools.greeter ]
+    let private prompt =
         { Prompt.Empty with
             Role = "You are a helpful assistant with access to tools."
             Objective = "Help the user by answering questions. Use tools when needed."
             Constraints = ["Always use a tool when the user asks about weather or math."] }
 
-    override _.Agent = DemoAgent(provider, tools, prompt) :> IAgent
+    let createAgent () = DemoAgent(provider, tools, prompt) :> IAgent
+
+    let definitions : Nao.Loader.WorkspaceDefinitions =
+        { AgentDefs = []
+          ToolDefs = []
+          EvalSuiteDefs = []
+          Agents = [ createAgent () ]
+          Tools = tools
+          Evaluators = []
+          Errors = [] }

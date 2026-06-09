@@ -32,9 +32,12 @@ type Prompt =
           OutputFormat = FreeText
           Context = [] }
 
+/// Functions for working with structured prompts
 module Prompt =
 
-    /// Render a structured prompt into a single system message string
+    /// Render a structured prompt into a single system message string.
+    /// Combines role, objective, domain knowledge, constraints, examples,
+    /// output format, and context into a well-formatted markdown prompt.
     let render (prompt: Prompt) =
         let sections = ResizeArray<string>()
 

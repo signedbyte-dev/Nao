@@ -11,10 +11,11 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="src/MSTestSettings.fs" />
-    <Compile Include="src/SessionTests.fs" />
+    <Compile Include="src/JsonSourceTests.fs" />
+    <Compile Include="src/AssemblySourceTests.fs" />
+    <Compile Include="src/WorkspaceLoaderTests.fs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Nao.Runtime.Orleans\Nao.Runtime.Orleans.fsproj" />
     <ProjectReference Include="..\..\src\Nao.Loader\Nao.Loader.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />

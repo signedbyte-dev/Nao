@@ -5,9 +5,13 @@ open System.Threading.Tasks
 
 /// A single memory entry stored by an agent
 type MemoryEntry =
-    { Key: string
+    { /// Unique key identifying this memory (e.g. "user-name", "preference.theme")
+      Key: string
+      /// The stored value
       Value: string
+      /// When the memory was created or last updated
       Timestamp: DateTimeOffset
+      /// Optional classification tags for filtering
       Tags: string list }
 
 /// Interface for persisting and retrieving agent memories
