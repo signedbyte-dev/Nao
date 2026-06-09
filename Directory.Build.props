@@ -5,5 +5,13 @@
     <RepositoryUrl>https://github.com/nao-agents/nao</RepositoryUrl>
     <FsDocsLicenseLink>https://github.com/nao-agents/nao/blob/main/LICENSE</FsDocsLicenseLink>
     <FsDocsReleaseNotesLink>https://github.com/nao-agents/nao/blob/main/CHANGELOG.md</FsDocsReleaseNotesLink>
+    <!-- NuGet packaging -->
+    <PackageId>$(MSBuildProjectName)</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>nao-agents</Authors>
+    <Description>Nao AI Agent Framework</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/nao-agents/nao</PackageProjectUrl>
+    <IsPackable>true</IsPackable>
   </PropertyGroup>
 </Project>
