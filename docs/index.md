@@ -15,7 +15,7 @@ Nao is an F# framework for building, orchestrating, and evaluating LLM-powered a
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                    Nao.Runtime.Orleans                    │
 │  SessionGrain · SessionDirectoryGrain · State Persistence│
@@ -46,7 +46,7 @@ The runtime (Orleans grains) owns all state — conversation history, memory ent
 
 Agents, tools, and eval suites can be defined as JSON in the `.nao/` directory:
 
-```
+```text
 .nao/
 ├── agents/     ← Agent definitions (prompt, model, tools, sub-agents)
 ├── tools/      ← Tool definitions (command, args)

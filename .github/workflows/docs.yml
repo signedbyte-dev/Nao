@@ -18,9 +18,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
@@ -34,15 +34,16 @@ jobs:
         run: dotnet build Nao.slnx -c Release
 
       - name: Generate docs
-        run: dotnet fsdocs build --clean --output ./site --parameters root /Nao/
+        run: dotnet fsdocs build --clean --output ./site --properties Configuration=Release --parameters root /Nao/
 
       - name: Add .nojekyll
         run: touch ./site/.nojekyll
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
+          include-hidden-files: true
 
   deploy:
     runs-on: ubuntu-latest
@@ -53,4 +54,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
