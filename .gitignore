@@ -12,5 +12,5 @@ Debug
 TestResults
 
 # Generated documentation output
-docs/output
 .fsdocs
+site
