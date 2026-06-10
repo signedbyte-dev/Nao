@@ -98,9 +98,9 @@ type AgentLoggerTests () =
     member _.CollectLoggerCapturesEntries () =
         let entries = ResizeArray<LogEntry>()
         let logger = AgentLogger.collect entries "test-source"
-        logger.Log Info "test message"
+        logger.Log LogLevel.Info "test message"
         Assert.AreEqual(1, entries.Count)
-        Assert.AreEqual(Info, entries.[0].Level)
+        Assert.AreEqual(LogLevel.Info, entries.[0].Level)
         Assert.AreEqual("test-source", entries.[0].Source)
         Assert.AreEqual("test message", entries.[0].Message)
 
@@ -109,16 +109,16 @@ type AgentLoggerTests () =
         let entries = ResizeArray<LogEntry>()
         let logger = AgentLogger.collect entries "src"
         let data = Map.ofList [("key", box "value")]
-        logger.LogWith Debug "msg" data
+        logger.LogWith LogLevel.Debug "msg" data
         Assert.AreEqual(1, entries.Count)
-        Assert.AreEqual(Debug, entries.[0].Level)
+        Assert.AreEqual(LogLevel.Debug, entries.[0].Level)
         Assert.IsTrue(entries.[0].Data.ContainsKey("key"))
 
     [<TestMethod>]
     member _.SilentLoggerDoesNotThrow () =
         let logger = AgentLogger.silent
-        logger.Log Error "should not crash"
-        logger.LogWith Warning "also fine" Map.empty
+        logger.Log LogLevel.Error "should not crash"
+        logger.LogWith LogLevel.Warning "also fine" Map.empty
         Assert.IsTrue(true)
 
 [<TestClass>]

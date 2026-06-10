@@ -7,7 +7,7 @@
     <FsDocsReleaseNotesLink>https://github.com/jichang/nao/blob/main/CHANGELOG.md</FsDocsReleaseNotesLink>
     <!-- NuGet packaging -->
     <PackageId>$(MSBuildProjectName)</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>jichang</Authors>
     <Description>Nao AI Agent Framework</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

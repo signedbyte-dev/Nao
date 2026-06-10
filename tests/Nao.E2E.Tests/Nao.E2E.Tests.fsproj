@@ -14,6 +14,7 @@
     <Compile Include="src/EndToEndTests.fs" />
     <Compile Include="src/OrchestratorTests.fs" />
     <Compile Include="src/OrchestratorLlmTests.fs" />
+    <Compile Include="src/EtclovgE2ETests.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nao.Core\Nao.Core.fsproj" />

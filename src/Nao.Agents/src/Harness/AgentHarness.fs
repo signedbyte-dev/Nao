@@ -13,12 +13,12 @@ module AgentHarness =
             let allLogs = ResizeArray<LogEntry>()
             let steps = ResizeArray<HarnessStepResult>()
 
-            config.Logger.Log Info (sprintf "Harness starting with input: %s" input)
+            config.Logger.Log LogLevel.Info (sprintf "Harness starting with input: %s" input)
 
             let! response = agent.RunAsync input
 
             sw.Stop()
-            config.Logger.Log Info (sprintf "Harness completed in %dms" sw.ElapsedMilliseconds)
+            config.Logger.Log LogLevel.Info (sprintf "Harness completed in %dms" sw.ElapsedMilliseconds)
 
             return
                 { FinalResponse = response

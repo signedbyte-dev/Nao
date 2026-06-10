@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Core types -->
     <Compile Include="src/Core/AgentState.fs" />
     <Compile Include="src/Core/Tool.fs" />
     <Compile Include="src/Core/AgentAction.fs" />
@@ -21,17 +22,56 @@
     <Compile Include="src/Core/AgentEvent.fs" />
     <Compile Include="src/Core/AgentEventSink.fs" />
     <Compile Include="src/Core/IAgent.fs" />
+
+    <!-- Shared types (used by multiple layers) -->
+    <Compile Include="src/Shared/RetryPolicy.fs" />
+
+    <!-- E: Execution Environment & Sandbox -->
+    <Compile Include="src/Environment/ResourceLimits.fs" />
+    <Compile Include="src/Environment/Sandbox.fs" />
+    <Compile Include="src/Environment/ExecutionEnvironment.fs" />
+
+    <!-- T: Tool Interface & Protocol -->
+    <Compile Include="src/ToolProtocol/ToolSchema.fs" />
+    <Compile Include="src/ToolProtocol/ToolProtocol.fs" />
+    <Compile Include="src/ToolProtocol/ToolRouter.fs" />
+
+    <!-- C: Context & Memory Management -->
     <Compile Include="src/Memory/ConversationWindow.fs" />
     <Compile Include="src/Memory/MemoryStore.fs" />
     <Compile Include="src/Memory/Summarizer.fs" />
     <Compile Include="src/Memory/SemanticMemory.fs" />
+    <Compile Include="src/Memory/MemoryTier.fs" />
+    <Compile Include="src/Memory/ContextCompaction.fs" />
+
+    <!-- L: Lifecycle & Orchestration -->
+    <Compile Include="src/Lifecycle/Lifecycle.fs" />
+    <Compile Include="src/Lifecycle/LifecyclePipeline.fs" />
     <Compile Include="src/Orchestration/Router.fs" />
     <Compile Include="src/Orchestration/Pipeline.fs" />
     <Compile Include="src/Orchestration/AgentGroup.fs" />
     <Compile Include="src/Orchestration/Orchestrator.fs" />
+
+    <!-- O: Observability & Operations -->
+    <Compile Include="src/Observability/Trace.fs" />
+    <Compile Include="src/Observability/Metrics.fs" />
+    <Compile Include="src/Observability/Resilience.fs" />
+
+    <!-- V: Verification & Evaluation -->
+    <Compile Include="src/Verification/Verification.fs" />
+    <Compile Include="src/Verification/Regression.fs" />
+
+    <!-- G: Governance & Security -->
+    <Compile Include="src/Governance/Permission.fs" />
+    <Compile Include="src/Governance/Constitution.fs" />
+    <Compile Include="src/Governance/AuditLog.fs" />
+    <Compile Include="src/Governance/PolicyEngine.fs" />
+
+    <!-- Harness (integrates all layers) -->
     <Compile Include="src/Harness/HarnessResult.fs" />
     <Compile Include="src/Harness/HarnessConfig.fs" />
     <Compile Include="src/Harness/AgentHarness.fs" />
+    <Compile Include="src/Harness/EtclovgHarness.fs" />
   </ItemGroup>
 
   <ItemGroup>

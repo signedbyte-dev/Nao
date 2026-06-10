@@ -17,6 +17,14 @@
     <Compile Include="src/MemoryStoreTests.fs" />
     <Compile Include="src/SummarizerTests.fs" />
     <Compile Include="src/SemanticMemoryTests.fs" />
+    <Compile Include="src/EnvironmentTests.fs" />
+    <Compile Include="src/ToolProtocolTests.fs" />
+    <Compile Include="src/ContextCompactionTests.fs" />
+    <Compile Include="src/LifecycleTests.fs" />
+    <Compile Include="src/ObservabilityTests.fs" />
+    <Compile Include="src/VerificationTests.fs" />
+    <Compile Include="src/GovernanceTests.fs" />
+    <Compile Include="src/EtclovgHarnessTests.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nao.Agents\Nao.Agents.fsproj" />

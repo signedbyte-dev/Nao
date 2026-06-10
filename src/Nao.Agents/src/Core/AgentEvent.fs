@@ -5,6 +5,9 @@ open Nao.Core
 
 /// Unified event type covering logging, progress, and conversation changes.
 /// Consumers subscribe to a single stream rather than separate callbacks.
+/// Note: LifecycleEvent (Lifecycle.fs) tracks state-machine transitions;
+/// AuditAction (AuditLog.fs) tracks governance decisions.
+/// These are separate concerns but share an ExecutionId for correlation.
 [<RequireQualifiedAccess>]
 type AgentEvent =
     // --- Logging ---
@@ -24,6 +27,9 @@ type AgentEvent =
     | MaxRoundsReached of rounds: int
     | Completed of answer: string
 
+    // --- Lifecycle (bridged from LifecycleEvent for unified consumption) ---
+    | LifecycleTransition of state: string * reason: string
+
     member this.Timestamp = DateTimeOffset.UtcNow
 
     /// Map an AgentEvent to a LogLevel for filtering purposes
@@ -37,3 +43,4 @@ type AgentEvent =
         | Completed _ -> LogLevel.Info
         | RoundError _ -> LogLevel.Warning
         | MaxRoundsReached _ -> LogLevel.Warning
+        | LifecycleTransition _ -> LogLevel.Debug
