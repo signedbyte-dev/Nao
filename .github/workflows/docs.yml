@@ -34,7 +34,7 @@ jobs:
         run: dotnet build Nao.slnx -c Release
 
       - name: Generate docs
-        run: dotnet fsdocs build --clean --output ./site --parameters root /nao/
+        run: dotnet fsdocs build --clean --output ./site --parameters root /Nao/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
