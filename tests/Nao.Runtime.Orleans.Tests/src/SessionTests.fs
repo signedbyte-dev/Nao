@@ -44,6 +44,7 @@ module TestWorkspace =
         { AgentDefs = []
           ToolDefs = []
           EvalSuiteDefs = []
+          ConstitutionDefs = []
           Agents = []
           Tools = []
           Evaluators = []

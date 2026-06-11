@@ -75,6 +75,7 @@ type AssemblySource(assemblyPath: string) =
                 { Agents = []
                   Tools = []
                   EvalSuites = []
+                  Constitutions = []
                   BuiltAgents = discoverAgents asm
                   BuiltTools = discoverTools asm
                   BuiltEvaluators = discoverEvaluators asm }

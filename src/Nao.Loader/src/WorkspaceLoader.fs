@@ -13,6 +13,8 @@ type WorkspaceDefinitions =
       ToolDefs: ToolDef list
       /// All eval suite definitions
       EvalSuiteDefs: EvalSuiteDef list
+      /// All constitution definitions (governance)
+      ConstitutionDefs: ConstitutionDef list
       /// Pre-built agents (from assemblies, etc.)
       Agents: IAgent list
       /// Pre-built tools (from assemblies, etc.)
@@ -37,6 +39,9 @@ module WorkspaceLoader =
         let evalDefs, evalErrors =
             result.EvalSuites
             |> List.partition (fun r -> match r with Result.Ok _ -> true | _ -> false)
+        let constDefs, constErrors =
+            result.Constitutions
+            |> List.partition (fun r -> match r with Result.Ok _ -> true | _ -> false)
 
         let unwrapOk results =
             results |> List.choose (fun r -> match r with Result.Ok v -> Some v | _ -> None)
@@ -47,10 +52,11 @@ module WorkspaceLoader =
             { AgentDefs = unwrapOk agentDefs
               ToolDefs = unwrapOk toolDefs
               EvalSuiteDefs = unwrapOk evalDefs
+              ConstitutionDefs = unwrapOk constDefs
               Agents = result.BuiltAgents
               Tools = result.BuiltTools
               Evaluators = result.BuiltEvaluators
-              Errors = unwrapErr agentErrors @ unwrapErr toolErrors @ unwrapErr evalErrors }
+              Errors = unwrapErr agentErrors @ unwrapErr toolErrors @ unwrapErr evalErrors @ unwrapErr constErrors }
         defs
 
     /// Load definitions from multiple sources and merge
@@ -59,6 +65,7 @@ module WorkspaceLoader =
         { AgentDefs = results |> List.collect (fun r -> r.AgentDefs)
           ToolDefs = results |> List.collect (fun r -> r.ToolDefs)
           EvalSuiteDefs = results |> List.collect (fun r -> r.EvalSuiteDefs)
+          ConstitutionDefs = results |> List.collect (fun r -> r.ConstitutionDefs)
           Agents = results |> List.collect (fun r -> r.Agents)
           Tools = results |> List.collect (fun r -> r.Tools)
           Evaluators = results |> List.collect (fun r -> r.Evaluators)

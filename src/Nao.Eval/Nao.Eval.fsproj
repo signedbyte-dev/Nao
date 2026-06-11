@@ -14,6 +14,7 @@
     <Compile Include="src/Evaluators/Regex.fs" />
     <Compile Include="src/Evaluators/LlmJudge.fs" />
     <Compile Include="src/Evaluators/Composite.fs" />
+    <Compile Include="src/Evaluators/VerificationJudge.fs" />
     <Compile Include="src/EvalReport.fs" />
     <Compile Include="src/EvalRunner.fs" />
   </ItemGroup>

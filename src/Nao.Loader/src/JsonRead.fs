@@ -144,3 +144,49 @@ module JsonRead =
           Agent = str elem "agent"
           Evaluator = evaluatorRef evaluatorElem
           Cases = objArray elem "cases" |> List.map evalCase }
+
+    let internal boolVal (elem: JsonElement) (prop: string) (defaultVal: bool) =
+        match elem.TryGetProperty(prop) with
+        | true, v when v.ValueKind = JsonValueKind.True -> true
+        | true, v when v.ValueKind = JsonValueKind.False -> false
+        | _ -> defaultVal
+
+    let constitutionRuleDef (elem: JsonElement) : ConstitutionRuleDef =
+        { Id = str elem "id"
+          Description = str elem "description"
+          Category = str elem "category"
+          Priority = intVal elem "priority" 0
+          IsHardConstraint = boolVal elem "hard_constraint" true
+          Pattern = str elem "pattern" }
+
+    let constitutionDef (elem: JsonElement) : ConstitutionDef =
+        { Name = str elem "name"
+          Version = str elem "version"
+          Rules = objArray elem "rules" |> List.map constitutionRuleDef }
+
+    let toolParameter (elem: JsonElement) : ToolParameter =
+        { Name = str elem "name"
+          Type = str elem "type"
+          Required = boolVal elem "required" false
+          Description = str elem "description"
+          Default = strOpt elem "default"
+          Examples = strArray elem "examples" }
+
+    let private parseCostCategory (s: string) =
+        match s.ToLowerInvariant() with
+        | "free" -> ToolCostCategory.Free
+        | "low" | "cheap" -> ToolCostCategory.Cheap
+        | "medium" | "moderate" -> ToolCostCategory.Moderate
+        | "high" | "expensive" -> ToolCostCategory.Expensive
+        | _ -> ToolCostCategory.Unknown
+
+    let toolSchema (elem: JsonElement) : ToolSchema =
+        { Name = str elem "name"
+          Description = str elem "description"
+          Category = strOpt elem "category"
+          Parameters = objArray elem "parameters" |> List.map toolParameter
+          ReturnDescription = strOpt elem "return_description"
+          Examples = []
+          IsSideEffectFree = boolVal elem "side_effect_free" false
+          CostCategory = str elem "cost_category" |> (fun s -> if s = "" then "Cheap" else s) |> parseCostCategory
+          Version = strOpt elem "version" }

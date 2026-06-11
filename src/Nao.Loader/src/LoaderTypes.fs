@@ -64,6 +64,30 @@ type EvalSuiteDef =
       /// Test cases to run against the agent
       Cases: EvalCase list }
 
+/// Parsed constitution rule definition loaded from JSON
+type ConstitutionRuleDef =
+    { /// Unique rule identifier
+      Id: string
+      /// Human-readable description
+      Description: string
+      /// Category: "Safety", "Privacy", "Behavioral", "Format", or "Domain:<name>"
+      Category: string
+      /// Priority (higher = more important)
+      Priority: int
+      /// Whether this is a hard constraint (blocks output) vs soft (warning)
+      IsHardConstraint: bool
+      /// Regex pattern for the check (content matching this pattern violates the rule)
+      Pattern: string }
+
+/// Parsed constitution definition (collection of rules)
+type ConstitutionDef =
+    { /// Constitution name
+      Name: string
+      /// Version identifier
+      Version: string
+      /// Rules in this constitution
+      Rules: ConstitutionRuleDef list }
+
 /// Errors that can occur during definition loading
 type LoadError =
     /// File path does not exist
@@ -96,6 +120,8 @@ type LoadedDefinitions =
     { Agents: LoadResult<AgentDef> list
       Tools: LoadResult<ToolDef> list
       EvalSuites: LoadResult<EvalSuiteDef> list
+      /// Governance constitution definitions
+      Constitutions: LoadResult<ConstitutionDef> list
       /// Pre-built agents discovered directly (e.g. from assemblies)
       BuiltAgents: IAgent list
       /// Pre-built tools discovered directly (e.g. from assemblies)
@@ -107,6 +133,7 @@ type LoadedDefinitions =
         { Agents = []
           Tools = []
           EvalSuites = []
+          Constitutions = []
           BuiltAgents = []
           BuiltTools = []
           BuiltEvaluators = [] }

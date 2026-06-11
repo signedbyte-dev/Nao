@@ -44,6 +44,7 @@ type JsonSource(rootDir: string) =
             { Agents = loadFromDir "agents" JsonRead.agentDef
               Tools = loadFromDir "tools" JsonRead.toolDef
               EvalSuites = loadFromDir "evals" JsonRead.evalSuiteDef
+              Constitutions = loadFromDir "governance" JsonRead.constitutionDef
               BuiltAgents = []
               BuiltTools = []
               BuiltEvaluators = [] }

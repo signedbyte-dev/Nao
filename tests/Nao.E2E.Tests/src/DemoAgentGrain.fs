@@ -80,6 +80,7 @@ module DemoWorkspace =
         { AgentDefs = []
           ToolDefs = []
           EvalSuiteDefs = []
+          ConstitutionDefs = []
           Agents = [ createAgent () ]
           Tools = tools
           Evaluators = []

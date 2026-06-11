@@ -1,6 +1,7 @@
 namespace Nao.Eval
 
 open System
+open Nao.Agents
 
 /// The verdict of a single evaluation
 [<RequireQualifiedAccess>]
@@ -36,7 +37,9 @@ type EvalResult =
       /// Evaluator that produced this result
       EvaluatorName: string
       /// Timestamp of evaluation
-      Timestamp: DateTimeOffset }
+      Timestamp: DateTimeOffset
+      /// Optional execution trace for deeper analysis and regression detection
+      ExecutionTrace: ExecutionTrace option }
 
 module EvalResult =
 
