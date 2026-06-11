@@ -107,7 +107,7 @@ type SessionInfoTests() =
     [<TestMethod>]
     member _.SessionGrainState_StartsEmpty() =
         let state = SessionGrainState()
-        Assert.AreEqual(0, state.ConversationHistory.Count)
+        Assert.AreEqual(0, state.Conversations.Count)
         Assert.AreEqual(0, state.Memories.Count)
         Assert.AreEqual("", state.Info.AgentName)
 
