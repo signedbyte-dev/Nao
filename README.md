@@ -1,17 +1,17 @@
 # Nao
 
-A multi-agent AI framework in F# with structured orchestration, memory management, the ETCLOVG seven-layer harness architecture, and Orleans-based distributed runtime.
+A multi-agent AI framework in F# with structured orchestration, memory management, the ETCLOVG seven-layer harness architecture, pluggable tool execution, and Orleans-based distributed multi-tenant runtime.
 
 ## Overview
 
-Nao is a framework for building composable AI agents that can reason, collaborate, and persist state. It provides structured prompt engineering, tool invocation, multi-agent orchestration patterns, conversation history management, semantic memory, governance, observability, and verification — all running on Microsoft Orleans for scalable distributed execution.
+Nao is a framework for building composable AI agents that can reason, collaborate, and persist state. It provides structured prompt engineering, tool invocation with content-type awareness and revert capabilities, multi-agent orchestration patterns, conversation history management, semantic memory, governance, observability, and verification — all running on Microsoft Orleans for scalable distributed multi-tenant execution.
 
 The framework implements the **ETCLOVG** taxonomy from "Agent Harness Engineering: A Survey" — seven layers that govern every agent execution:
 
 | Layer | Concern | Key Types |
 |-------|---------|-----------|
 | **E** — Execution | Resource-bounded sandboxed execution | `ExecutionContext`, `ResourceLimits`, `SandboxConfig` |
-| **T** — Tool Protocol | Structured tool discovery, middleware, rate limiting | `IToolProtocol`, `ToolSchema`, `IToolMiddleware` |
+| **T** — Tool Protocol | Structured tool discovery, middleware, verify/revert | `IToolProtocol`, `ToolSchema`, `IToolMiddleware`, `ExecutionJournal` |
 | **C** — Context & Memory | Tiered memory, context compaction | `ITieredMemory`, `ContextCompaction`, `MemoryTier` |
 | **L** — Lifecycle | State-machine lifecycle, pipeline stages | `AgentLifecycle`, `LifecyclePipeline`, `RetryPolicy` |
 | **O** — Observability | Distributed tracing, metrics, resilience | `ITracer`, `IMetricsCollector`, `CircuitBreaker` |
@@ -27,12 +27,18 @@ The framework implements the **ETCLOVG** taxonomy from "Agent Harness Engineerin
 - **Persistent State** — Orleans grain persistence for conversation history and memories across sessions
 - **Structured Prompts** — Type-safe prompt engineering with roles, constraints, examples, and output formats
 - **Tool Protocol** — MCP-inspired tool discovery with middleware, rate limiting, and schemas
+- **Content Metadata** — Generic `ContentMeta` type lets tools/agents declare output types (JSON, PDF, images, etc.)
+- **Tool Verify & Revert** — Tools can declare verify (check correctness) and revert (undo side-effects) capabilities
+- **Execution Journal** — Immutable log of all tool executions; supports bulk revert of revertible operations
+- **Pluggable Tool Execution** — Tools run as processes, HTTP calls, or custom executors (gRPC, MCP, etc.)
 - **Governance** — Constitution rules, permission models, audit logging, and runtime policy enforcement
 - **Observability** — Distributed tracing (OpenTelemetry-style), cost metrics, circuit breakers, retries
 - **Verification** — Readiness gates, execution trace capture, LLM judges, regression detection
 - **Evaluation** — Test case framework with multiple evaluators, LLM judges, and dataset-level reports
 - **Multi-Provider Support** — Pluggable LLM backends (OpenAI, Anthropic, Ollama, vLLM, llama.cpp)
 - **Workspace Loader** — JSON definitions and assembly plugin discovery for agents, tools, and evals
+- **Multi-Workspace Runtime** — Multiple isolated workspaces within a single Orleans silo with dynamic hot-reload
+- **Group Directory** — Organizational multi-tenancy: groups own sessions, members, and default workspaces
 - **F# First** — Immutable records, discriminated unions, and functional composition throughout
 
 ## Project Structure
@@ -40,15 +46,15 @@ The framework implements the **ETCLOVG** taxonomy from "Agent Harness Engineerin
 ```
 Nao.slnx
 ├── src/
-│   ├── Nao.Core/                # Core types: Message, Role, CompletionResult, ILlmProvider
+│   ├── Nao.Core/                # Core types: Message, Role, ContentMeta, ILlmProvider
 │   ├── Nao.Agents/              # Agent framework (ETCLOVG architecture)
 │   │   ├── Shared/              # Cross-layer types (RetryPolicy)
-│   │   ├── Core/                # IAgent, AgentId, AgentState, Tool, AgentAction, AgentEvent
+│   │   ├── Core/                # IAgent, AgentId, AgentState, Tool (verify/revert), AgentAction
 │   │   ├── Prompts/             # Prompt, PromptExample, OutputFormat
 │   │   ├── Messaging/           # AgentMessage for inter-agent communication
 │   │   ├── Logging/             # LogLevel, LogEntry, AgentLogger
 │   │   ├── Environment/         # [E] ResourceLimits, SandboxConfig, ExecutionContext
-│   │   ├── ToolProtocol/        # [T] ToolSchema, IToolProtocol, ToolRouter
+│   │   ├── ToolProtocol/        # [T] ToolSchema, IToolProtocol, ToolRouter, ExecutionJournal
 │   │   ├── Memory/              # [C] ConversationWindow, MemoryStore, SemanticMemory, ContextCompaction
 │   │   ├── Lifecycle/           # [L] AgentLifecycle, LifecyclePipeline
 │   │   ├── Orchestration/       # [L] Router, Pipeline, AgentGroup, Orchestrator
@@ -57,9 +63,11 @@ Nao.slnx
 │   │   ├── Governance/          # [G] Permission, Constitution, AuditLog, PolicyEngine
 │   │   └── Harness/             # EtclovgHarness (integrates all layers)
 │   ├── Nao.Eval/               # Evaluation framework: test cases, evaluators, LLM judge
-│   ├── Nao.Loader/             # Workspace loader: JSON definitions, assembly plugins
+│   ├── Nao.Loader/             # Workspace loader: JSON defs, multi-mode execution, plugins
 │   ├── Nao.Providers/          # LLM provider implementations
-│   └── Nao.Runtime.Orleans/    # Distributed runtime (grains, persistence)
+│   └── Nao.Runtime.Orleans/    # Distributed runtime (grains, workspaces, groups)
+│       ├── Workspace/           # WorkspaceRegistry (multi-tenant workspace isolation)
+│       └── Grains/              # SessionGrain, SessionDirectory, GroupDirectory
 └── tests/
     ├── Nao.Core.Tests/
     ├── Nao.Agents.Tests/        # Unit tests for all ETCLOVG layers
@@ -239,6 +247,43 @@ let! result = protocol.InvokeAsync "get_weather" "London"
 // result.Success, result.Output, result.DurationMs, result.Error
 ```
 
+### Content Metadata
+
+Tools and agents declare their output type via `ContentMeta`:
+
+```fsharp
+let meta = ContentMeta.Json
+let custom = ContentMeta.WithMeta "image/png" [ "width", "1024"; "height", "768" ]
+```
+
+### Tool Verify & Revert
+
+Tools can optionally verify correctness and undo side-effects:
+
+```fsharp
+let tool =
+    { Tool.Create("deploy", "Deploy to staging", fun input -> task { ... }) with
+        Verify = Some (fun input output -> task {
+            // Check the deployment was successful
+            return Ok ()
+        })
+        Revert = Some (fun ctx -> task {
+            // Rollback the deployment
+            return Ok ()
+        }) }
+```
+
+### Execution Journal
+
+Immutable audit log of all tool executions; enables bulk revert:
+
+```fsharp
+let journal = InMemoryExecutionJournal() :> IExecutionJournal
+
+// Revert all revertible operations
+let! failures = ExecutionJournal.revertAllAsync journal tools
+```
+
 ### Governance (G)
 
 **Permission Model** — Control which tools/capabilities agents can access:
@@ -344,14 +389,36 @@ Built-in evaluators: `ExactMatch`, `Contains`, `Regex`, `LlmJudge`, `Composite`.
 
 Agents run as Orleans grains for distributed, persistent execution:
 
-- `AgentGrainBase` — Simple stateless grain wrapper
-- `StatefulAgentGrainBase` — Persistent conversation + memory with automatic windowing
+- `SessionGrain` — Full ETCLOVG-integrated session with multi-conversation support
+- `SessionDirectoryGrain` — Tracks all sessions per user
+- `GroupDirectoryGrain` — Organizational multi-tenancy with member/session management
+- `WorkspaceRegistry` — Multiple isolated workspaces within a single silo
 
 ```fsharp
-type MyAgentGrain(state) =
-    inherit StatefulAgentGrainBase(state)
-    override _.Agent = myAgent
-    override _.WindowStrategy = Some (LastN 50)
+// Register multiple workspaces in the silo
+let registry = WorkspaceRegistry.fromWorkspaces [
+    WorkspaceId.create "team-a", loadedDefsA
+    WorkspaceId.create "team-b", loadedDefsB
+]
+
+// Sessions resolve agents/tools from their workspace
+let options = { AgentName = "assistant"; WorkspaceKey = "team-a"; GroupId = Some "org-1"; ToolNames = [] }
+sessionGrain.StartAsync(options)
+
+// Switch workspace at runtime without losing conversation
+sessionGrain.SwitchWorkspaceAsync("team-b")
+```
+
+#### Group Directory
+
+Organizational isolation — groups manage members, sessions, and default workspaces:
+
+```fsharp
+let groupGrain = clusterClient.GetGrain<IGroupDirectoryGrain>("org-1")
+groupGrain.InitAsync("Engineering", "team-a")
+groupGrain.AddMemberAsync("user-123", "admin")
+groupGrain.RegisterSessionAsync(entry)
+let! sessions = groupGrain.ListUserSessionsAsync("user-123")
 ```
 
 ### Structured Prompts

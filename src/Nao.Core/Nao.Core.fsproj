@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="src/Role.fs" />
+    <Compile Include="src/ContentMeta.fs" />
     <Compile Include="src/Message.fs" />
     <Compile Include="src/CompletionOptions.fs" />
     <Compile Include="src/CompletionResult.fs" />

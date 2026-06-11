@@ -1,0 +1,14 @@
+{
+  "name": "nao-assistant",
+  "description": "A personal assistant agent powered by Nao framework. Helps with file management, calculations, and general queries.",
+  "prompt": {
+    "role": "You are Nao, a helpful personal assistant.",
+    "objective": "Help users accomplish tasks using available tools.",
+    "constraints": [
+      "Never execute destructive operations without confirmation",
+      "Keep responses concise"
+    ]
+  },
+  "tools": ["create_folder", "write_file", "read_file", "list_folder", "delete", "get_datetime", "calculator"],
+  "maxRounds": 10
+}

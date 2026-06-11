@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Nao.Agents/Nao.Agents.fsproj" />
     <Project Path="src/Nao.Core/Nao.Core.fsproj" />
+    <Project Path="src/Nao.Demo/Nao.Demo.fsproj" />
     <Project Path="src/Nao.Eval/Nao.Eval.fsproj" />
     <Project Path="src/Nao.Loader/Nao.Loader.fsproj" />
     <Project Path="src/Nao.Providers/Nao.Providers.fsproj" />

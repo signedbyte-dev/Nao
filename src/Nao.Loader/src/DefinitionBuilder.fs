@@ -1,35 +1,123 @@
 namespace Nao.Loader
 
+open System
 open System.Diagnostics
+open System.Net.Http
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open Nao.Agents
 open Nao.Core
 open Nao.Eval
 
+/// Extension point for custom tool execution strategies (gRPC, MCP, etc.)
+type IToolExecutor =
+    /// Execute a tool with the given input and config, return (success, output)
+    abstract member ExecuteAsync: input: string * config: Map<string, string> -> Task<Result<string, string>>
+
 /// Builds runnable domain objects from parsed definitions
 module DefinitionBuilder =
 
-    /// Build a Tool from a ToolDef (command-based execution)
+    /// Registry of custom tool executors (populated at startup by consumers)
+    let private executors = System.Collections.Concurrent.ConcurrentDictionary<string, IToolExecutor>()
+
+    /// Register a custom tool executor by name
+    let registerExecutor (name: string) (executor: IToolExecutor) =
+        executors.[name] <- executor
+
+    /// Remove a custom tool executor
+    let removeExecutor (name: string) =
+        executors.TryRemove(name) |> ignore
+
+    /// Run a process with arguments and return (exitCode, stdout)
+    let private runProcess (cmd: string) (args: string list) : Task<int * string> =
+        task {
+            let psi = ProcessStartInfo(cmd)
+            psi.RedirectStandardOutput <- true
+            psi.RedirectStandardError <- true
+            psi.UseShellExecute <- false
+            psi.CreateNoWindow <- true
+            for arg in args do
+                psi.ArgumentList.Add(arg)
+            use proc = Process.Start(psi)
+            let! output = proc.StandardOutput.ReadToEndAsync()
+            do! proc.WaitForExitAsync()
+            return (proc.ExitCode, output.TrimEnd())
+        }
+
+    /// Execute an HTTP call and return the response body
+    let private runHttp (url: string) (httpMethod: string) (headers: Map<string, string>) (input: string) : Task<Result<string, string>> =
+        task {
+            use client = new HttpClient()
+            for kv in headers do
+                client.DefaultRequestHeaders.TryAddWithoutValidation(kv.Key, kv.Value) |> ignore
+            let! response =
+                match httpMethod.ToUpperInvariant() with
+                | "GET" -> client.GetAsync(url + "?input=" + Uri.EscapeDataString(input))
+                | "PUT" -> client.PutAsync(url, new StringContent(input, Text.Encoding.UTF8, "application/json"))
+                | "DELETE" -> client.DeleteAsync(url + "?input=" + Uri.EscapeDataString(input))
+                | _ -> client.PostAsync(url, new StringContent(input, Text.Encoding.UTF8, "application/json"))
+            let! body = response.Content.ReadAsStringAsync()
+            if response.IsSuccessStatusCode then
+                return Ok body
+            else
+                return Error (sprintf "HTTP %d: %s" (int response.StatusCode) body)
+        }
+
+    /// Execute a ToolExecutionDef with the given arguments
+    let private executeDefAsync (exec: ToolExecutionDef) (args: string list) : Task<Result<string, string>> =
+        task {
+            match exec with
+            | ToolExecutionDef.Process (cmd, fixedArgs) ->
+                let! (exitCode, output) = runProcess cmd (fixedArgs @ args)
+                if exitCode = 0 then return Ok output
+                else return Error (sprintf "Process exited with code %d: %s" exitCode output)
+            | ToolExecutionDef.Http (url, httpMethod, headers) ->
+                let input = args |> String.concat " "
+                return! runHttp url httpMethod headers input
+            | ToolExecutionDef.Custom (executorName, config) ->
+                match executors.TryGetValue(executorName) with
+                | true, executor ->
+                    let input = args |> String.concat " "
+                    return! executor.ExecuteAsync(input, config)
+                | false, _ ->
+                    return Error (sprintf "Custom executor '%s' not registered" executorName)
+        }
+
+    /// Build a Tool from a ToolDef
     let buildTool (def: ToolDef) : Tool =
+        let verify =
+            match def.VerifyExecution with
+            | None -> None
+            | Some verifyExec ->
+                Some (fun (input: string) (output: string) ->
+                    task {
+                        let! result = executeDefAsync verifyExec [input; output]
+                        return result |> Result.map ignore
+                    })
+        let revert =
+            match def.RevertExecution with
+            | None -> None
+            | Some revertExec ->
+                Some (fun (ctx: RevertContext) ->
+                    task {
+                        let! result = executeDefAsync revertExec [ctx.Input; ctx.Output]
+                        return result |> Result.map ignore
+                    })
+        let contentType =
+            if String.IsNullOrEmpty(def.OutputContentType) then ContentMeta.Text
+            else ContentMeta.Of def.OutputContentType
         { Name = def.Name
           Description = def.Description
-          Execute = fun input ->
-            task {
-                let psi = ProcessStartInfo(def.Command)
-                psi.RedirectStandardOutput <- true
-                psi.RedirectStandardError <- true
-                psi.UseShellExecute <- false
-                psi.CreateNoWindow <- true
-                for arg in def.Args do
-                    psi.ArgumentList.Add(arg)
-                psi.ArgumentList.Add(input)
-
-                use proc = Process.Start(psi)
-                let! output = proc.StandardOutput.ReadToEndAsync()
-                do! proc.WaitForExitAsync()
-                return output.TrimEnd()
-            } }
+          Execute = fun input -> task {
+            let! result = executeDefAsync def.Execution [input]
+            return
+                match result with
+                | Ok output -> output
+                | Error err -> sprintf "[Error] %s" err
+          }
+          OutputContentType = contentType
+          Verify = verify
+          Revert = revert }
 
     /// Build an OrchestratorConfig from an AgentDef
     let buildOrchestratorConfig

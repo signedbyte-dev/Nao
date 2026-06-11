@@ -34,6 +34,7 @@
     <!-- T: Tool Interface & Protocol -->
     <Compile Include="src/ToolProtocol/ToolSchema.fs" />
     <Compile Include="src/ToolProtocol/ToolProtocol.fs" />
+    <Compile Include="src/ToolProtocol/ExecutionJournal.fs" />
     <Compile Include="src/ToolProtocol/ToolRouter.fs" />
 
     <!-- C: Context & Memory Management -->

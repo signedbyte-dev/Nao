@@ -26,17 +26,30 @@ type AgentDef =
       /// Maximum orchestration rounds before forcing a response
       MaxRounds: int }
 
+/// How a tool executes (the mechanism for running the tool)
+type ToolExecutionDef =
+    /// Execute a program/process. Works with any executable: bash, python, node, .exe, etc.
+    | Process of command: string * args: string list
+    /// Call an HTTP endpoint. The input is sent as the request body.
+    | Http of url: string * method: string * headers: Map<string, string>
+    /// Use a named executor registered at runtime (for custom protocols: gRPC, MCP, etc.)
+    | Custom of executor: string * config: Map<string, string>
+
 /// Parsed tool definition loaded from JSON configuration.
-/// Tools execute external commands and return their output.
+/// Supports multiple execution strategies: process, HTTP, custom.
 type ToolDef =
     { /// Unique name identifying this tool
       Name: string
       /// Human-readable description shown to agents
       Description: string
-      /// Shell command to execute
-      Command: string
-      /// Fixed arguments prepended before the tool input
-      Args: string list }
+      /// How this tool executes
+      Execution: ToolExecutionDef
+      /// Content type of the tool's output (e.g. "text/plain", "application/json")
+      OutputContentType: string
+      /// Optional execution definition for verifying output
+      VerifyExecution: ToolExecutionDef option
+      /// Optional execution definition for reverting changes
+      RevertExecution: ToolExecutionDef option }
 
 /// Reference to an evaluator used in an eval suite
 type EvaluatorRef =

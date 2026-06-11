@@ -9,7 +9,7 @@ open Nao.Agents
 type ToolSchemaTests() =
 
     let makeTool name desc =
-        { Name = name; Description = desc; Execute = fun _ -> Task.FromResult "ok" }
+        Tool.Create(name, desc, fun _ -> Task.FromResult "ok")
 
     [<TestMethod>]
     member _.FromToolCreatesBasicSchema() =
@@ -42,8 +42,8 @@ type ToolSchemaTests() =
 type ToolProtocolTests() =
 
     let tools =
-        [ { Name = "add"; Description = "Add numbers"; Execute = fun input -> Task.FromResult (sprintf "result:%s" input) }
-          { Name = "sub"; Description = "Subtract numbers"; Execute = fun _ -> Task.FromResult "subtracted" } ]
+        [ Tool.Create("add", "Add numbers", fun input -> Task.FromResult (sprintf "result:%s" input))
+          Tool.Create("sub", "Subtract numbers", fun _ -> Task.FromResult "subtracted") ]
 
     [<TestMethod>]
     member _.FromToolsListsAll() =
@@ -82,7 +82,7 @@ type ToolProtocolTests() =
 
     [<TestMethod>]
     member _.InvokeAsyncHandlesException() =
-        let failTools = [ { Name = "fail"; Description = "Fails"; Execute = fun _ -> failwith "boom" } ]
+        let failTools = [ Tool.Create("fail", "Fails", fun _ -> failwith "boom") ]
         let protocol = ToolProtocol.fromTools failTools
         let result = (protocol.InvokeAsync "fail" "x").Result
         Assert.IsFalse(result.Success)

@@ -108,7 +108,19 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                     | Some name, Some input -> Some (DelegateToAgent (name, input))
                     | Some name, None -> Some (DelegateToAgent (name, ""))
                     | _ -> None
-                | _ -> None
+                | Some actionValue ->
+                    // Fallback: small models sometimes emit {"action":"<tool_name>","input":"..."}
+                    // instead of {"action":"tool","name":"<tool_name>","input":"..."}
+                    let isKnownTool = config.Tools |> List.exists (fun t -> t.Name = actionValue)
+                    let isKnownAgent = config.SubAgents |> List.exists (fun a -> a.Id.Name = actionValue)
+                    if isKnownTool then
+                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
+                        Some (InvokeTool (actionValue, input))
+                    elif isKnownAgent then
+                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
+                        Some (DelegateToAgent (actionValue, input))
+                    else None
+                | None -> None
             with _ -> None
         else
             None
@@ -182,8 +194,27 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                     | Some tool ->
                         let! toolResult = tool.Execute toolInput
                         emit (AgentEvent.ToolResult (toolName, toolResult))
-                        let resultMsg = { Role = User; Content = sprintf "[Tool Result from %s]: %s" toolName toolResult }
+                        // Run Verify if available — inject failure back so LLM can retry
+                        let! verifyMsg =
+                            match tool.Verify with
+                            | Some verify ->
+                                task {
+                                    let! vr = verify toolInput toolResult
+                                    match vr with
+                                    | Ok () -> return None
+                                    | Error reason ->
+                                        emit (AgentEvent.ToolVerifyFailed (toolName, reason))
+                                        return Some (sprintf "[Verification Failed for %s]: %s. Please retry or choose a different approach." toolName reason)
+                                }
+                            | None -> Task.FromResult None
+                        let resultContent = sprintf "[Tool Result from %s]: %s" toolName toolResult
+                        let resultMsg = { Role = User; Content = resultContent }
                         conversation <- conversation @ [ resultMsg ]
+                        match verifyMsg with
+                        | Some failMsg ->
+                            let failMsgEntry = { Role = User; Content = failMsg }
+                            conversation <- conversation @ [ failMsgEntry ]
+                        | None -> ()
                     | None ->
                         let err = sprintf "Tool '%s' not found. Available tools: %s" toolName (config.Tools |> List.map (fun t -> t.Name) |> String.concat ", ")
                         emit (AgentEvent.RoundError err)

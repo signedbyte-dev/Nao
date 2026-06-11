@@ -37,8 +37,10 @@ module TestWorkspace =
     let toolDef name =
         { Name = name
           Description = sprintf "Test tool: %s" name
-          Command = "echo"
-          Args = ["test-output"] }
+          Execution = ToolExecutionDef.Process ("echo", ["test-output"])
+          OutputContentType = ""
+          VerifyExecution = None
+          RevertExecution = None }
 
     let empty : WorkspaceDefinitions =
         { AgentDefs = []
@@ -180,9 +182,8 @@ type WorkspaceResolutionTests() =
     [<TestMethod>]
     member _.BuiltTool_ResolvedByName() =
         let myTool: Tool =
-            { Name = "greet"
-              Description = "greets"
-              Execute = fun name -> Task.FromResult(sprintf "Hello %s" name) }
+            Tool.Create("greet", "greets",
+                fun name -> Task.FromResult(sprintf "Hello %s" name))
         let ws = TestWorkspace.empty |> TestWorkspace.withBuiltTool myTool
         let found = ws.Tools |> List.tryFind (fun t -> t.Name = "greet")
         Assert.IsTrue(found.IsSome)

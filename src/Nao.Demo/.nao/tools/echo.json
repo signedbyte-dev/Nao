@@ -1,0 +1,10 @@
+{
+  "name": "echo",
+  "description": "Echo back the input text. Useful for testing tool invocation.",
+  "execution": {
+    "type": "process",
+    "command": "echo",
+    "args": ["{{input}}"]
+  },
+  "outputContentType": "text"
+}

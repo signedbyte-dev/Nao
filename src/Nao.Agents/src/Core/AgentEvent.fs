@@ -21,6 +21,7 @@ type AgentEvent =
     | Thinking of round: int
     | InvokingTool of name: string * input: string
     | ToolResult of name: string * result: string
+    | ToolVerifyFailed of name: string * reason: string
     | DelegatingToAgent of name: string * input: string
     | AgentResult of name: string * result: string
     | RoundError of message: string
@@ -40,6 +41,7 @@ type AgentEvent =
         | Thinking _ -> LogLevel.Debug
         | InvokingTool _ | DelegatingToAgent _ -> LogLevel.Info
         | ToolResult _ | AgentResult _ -> LogLevel.Info
+        | ToolVerifyFailed _ -> LogLevel.Warning
         | Completed _ -> LogLevel.Info
         | RoundError _ -> LogLevel.Warning
         | MaxRoundsReached _ -> LogLevel.Warning

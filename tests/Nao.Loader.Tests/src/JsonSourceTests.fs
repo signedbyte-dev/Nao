@@ -84,8 +84,11 @@ type JsonSourceTests() =
         | Result.Ok def ->
             Assert.AreEqual("web-search", def.Name)
             Assert.AreEqual("Search the web", def.Description)
-            Assert.AreEqual("curl", def.Command)
-            Assert.AreEqual(["-s"; "https://api.example.com/search?q="], def.Args)
+            match def.Execution with
+            | ToolExecutionDef.Process (cmd, args) ->
+                Assert.AreEqual("curl", cmd)
+                Assert.AreEqual(["-s"; "https://api.example.com/search?q="], args)
+            | _ -> Assert.Fail("Expected Process execution")
         | Result.Error e -> Assert.Fail(LoadError.format e)
 
     [<TestMethod>]

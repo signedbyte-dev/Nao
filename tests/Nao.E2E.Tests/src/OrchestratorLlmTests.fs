@@ -47,34 +47,31 @@ type OrchestratorWithLocalLlmTests() =
         if skipTests then Assert.Inconclusive("Local LLM (Ollama) not available. Run scripts/start-local-llm.sh first.")
 
     let tools = [
-        { Name = "get_weather"
-          Description = "Get the current weather for a city. Input: city name."
-          Execute = fun city ->
-            Task.FromResult(sprintf """{"city":"%s","temp_c":22,"condition":"partly cloudy","humidity":65}""" city) }
+        Tool.Create("get_weather", "Get the current weather for a city. Input: city name.",
+            fun city ->
+                Task.FromResult(sprintf """{"city":"%s","temp_c":22,"condition":"partly cloudy","humidity":65}""" city))
 
-        { Name = "calculate"
-          Description = "Evaluate a math expression. Input: a math expression like '2 + 2' or '15 * 3'."
-          Execute = fun expr ->
-            let result =
-                match expr.Trim() with
-                | "2 + 2" -> "4"
-                | "15 * 3" -> "45"
-                | "100 / 4" -> "25"
-                | "7 * 8" -> "56"
-                | _ -> sprintf "Result of %s = (computed)" expr
-            Task.FromResult(result) }
+        Tool.Create("calculate", "Evaluate a math expression. Input: a math expression like '2 + 2' or '15 * 3'.",
+            fun expr ->
+                let result =
+                    match expr.Trim() with
+                    | "2 + 2" -> "4"
+                    | "15 * 3" -> "45"
+                    | "100 / 4" -> "25"
+                    | "7 * 8" -> "56"
+                    | _ -> sprintf "Result of %s = (computed)" expr
+                Task.FromResult(result))
 
-        { Name = "lookup_capital"
-          Description = "Look up the capital city of a country. Input: country name."
-          Execute = fun country ->
-            let capital =
-                match country.Trim().ToLower() with
-                | "france" -> "Paris"
-                | "japan" -> "Tokyo"
-                | "brazil" -> "Brasilia"
-                | "australia" -> "Canberra"
-                | c -> sprintf "Unknown capital for %s" c
-            Task.FromResult(capital) }
+        Tool.Create("lookup_capital", "Look up the capital city of a country. Input: country name.",
+            fun country ->
+                let capital =
+                    match country.Trim().ToLower() with
+                    | "france" -> "Paris"
+                    | "japan" -> "Tokyo"
+                    | "brazil" -> "Brasilia"
+                    | "australia" -> "Canberra"
+                    | c -> sprintf "Unknown capital for %s" c
+                Task.FromResult(capital))
     ]
 
     [<TestMethod>]
@@ -183,12 +180,10 @@ type OrchestratorWithMockProviderTests() =
                 Task.FromResult({ Content = response; FinishReason = "stop"; TokensUsed = Some 10 }) }
 
     let tools = [
-        { Name = "get_weather"
-          Description = "Get weather for a city"
-          Execute = fun city -> Task.FromResult(sprintf "Sunny, 20°C in %s" city) }
-        { Name = "lookup_capital"
-          Description = "Look up capital of a country"
-          Execute = fun country -> Task.FromResult(sprintf "The capital of %s is Paris" country) }
+        Tool.Create("get_weather", "Get weather for a city",
+            fun city -> Task.FromResult(sprintf "Sunny, 20°C in %s" city))
+        Tool.Create("lookup_capital", "Look up capital of a country",
+            fun country -> Task.FromResult(sprintf "The capital of %s is Paris" country))
     ]
 
     let poetryAgent =

@@ -6,12 +6,12 @@ Nao is an F# framework for building, orchestrating, and evaluating LLM-powered a
 
 | Project | Description |
 |---------|-------------|
-| [Nao.Core](reference/nao-core.html) | Core domain types — messages, roles, completion options, LLM provider interface |
-| [Nao.Agents](reference/nao-agents.html) | Agent framework — ETCLOVG harness, orchestration, tools, memory, governance |
+| [Nao.Core](reference/nao-core.html) | Core domain types — messages, roles, content metadata, LLM provider interface |
+| [Nao.Agents](reference/nao-agents.html) | Agent framework — ETCLOVG harness, tools (verify/revert), execution journal, orchestration |
 | [Nao.Providers](reference/nao-providers.html) | LLM provider implementations (Ollama, OpenAI, Anthropic, vLLM, llama.cpp) |
-| [Nao.Loader](reference/nao-loader.html) | Workspace loader — JSON definitions, assembly plugins, governance config |
+| [Nao.Loader](reference/nao-loader.html) | Workspace loader — JSON definitions, multi-mode execution (Process/HTTP/Custom), plugins |
 | [Nao.Eval](reference/nao-eval.html) | Agent evaluation framework — test cases, evaluators, LLM judge, regression |
-| [Nao.Runtime.Orleans](reference/nao-runtime-orleans.html) | Distributed runtime via Microsoft Orleans — session grains, state persistence |
+| [Nao.Runtime.Orleans](reference/nao-runtime-orleans.html) | Distributed runtime — multi-workspace registry, group directory, session grains |
 
 ## Architecture
 
@@ -20,10 +20,10 @@ The framework implements the **ETCLOVG** seven-layer taxonomy for structured age
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Nao.Runtime.Orleans                               │
-│  SessionGrain · SessionDirectoryGrain · State Persistence            │
+│  WorkspaceRegistry · SessionGrain · GroupDirectoryGrain · Persistence  │
 ├─────────────────────────────────────────────────────────────────────┤
 │                        Nao.Loader                                    │
-│  JSON Definitions · Assembly Plugins · Governance Config             │
+│  JSON Definitions · Multi-mode Execution · Assembly Plugins            │
 ├─────────────────────────────────────────────────────────────────────┤
 │                        Nao.Eval                                      │
 │  EvalCase · IEvaluator · LlmJudge · EvalReport · Regression         │
@@ -42,7 +42,7 @@ The framework implements the **ETCLOVG** seven-layer taxonomy for structured age
 │ └────────────────────────────────────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────────────┤
 │                        Nao.Core                                      │
-│  Message · Role · CompletionOptions · ILlmProvider · Tool            │
+│  Message · Role · ContentMeta · CompletionOptions · ILlmProvider      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -64,6 +64,10 @@ MCP-inspired structured tool discovery and invocation with middleware:
 - `ToolSchema` — Rich tool metadata (parameters, examples, cost category)
 - `IToolMiddleware` — Pre/post-processing (rate limiting, auditing, transformation)
 - `ToolRouter` — Pattern-based or name-based tool selection
+- `ContentMeta` — Generic content-type tag on tool outputs (text, JSON, PDF, images, etc.)
+- `Tool.Verify` — Optional function to check output correctness
+- `Tool.Revert` — Optional function to undo side-effects (with `RevertContext`)
+- `ExecutionJournal` — Immutable log of tool executions; supports bulk revert of revertible operations
 
 ### C — Context & Memory
 
@@ -130,12 +134,40 @@ Agents, tools, eval suites, and governance configs can be defined as JSON in the
 ```text
 .nao/
 ├── agents/        ← Agent definitions (prompt, model, tools, sub-agents)
-├── tools/         ← Tool definitions (command, args, schema)
+├── tools/         ← Tool definitions (process, HTTP, or custom executors)
 ├── evals/         ← Evaluation suite definitions
-└── governance/    ← Constitution rules, permissions (planned)
+└── governance/    ← Constitution rules, permissions
 ```
 
 Or discovered from .NET assemblies in the `plugins/` directory.
+
+Tools support three execution strategies via `ToolExecutionDef`:
+
+| Mode | JSON field | Use case |
+|------|-----------|----------|
+| **Process** | `command` + `args` | Run any executable (bash, python, node, .exe) |
+| **HTTP** | `url` + `method` + `headers` | Call REST APIs, webhooks |
+| **Custom** | `executor` + `config` | Use registered `IToolExecutor` (gRPC, MCP, etc.) |
+
+Tools can also declare `verify_command`/`revert_command` for correctness checks and rollback.
+
+### Multi-Workspace Runtime
+
+Multiple isolated workspaces can coexist within a single Orleans silo:
+
+- `WorkspaceRegistry` — Thread-safe registry of loaded workspace definitions
+- Dynamic registration — Add/remove/reload workspaces at runtime
+- Session isolation — Each session is bound to a specific workspace key
+- Hot-reload — `ReloadAsync` reloads a workspace from its source path
+
+### Group Directory
+
+Organizational multi-tenancy for teams and enterprises:
+
+- `GroupDirectoryGrain` — Manages members, sessions, and workspace defaults per group
+- Role-based membership — Members have roles (admin, member, etc.)
+- Session ownership — Track which sessions belong to which users and groups
+- Default workspace — Groups can set a default workspace for new sessions
 
 ### Orchestration
 

@@ -15,37 +15,33 @@ open Nao.Agents
 module EtclovgDemoTools =
 
     let stockPrice: Tool =
-        { Name = "get_stock_price"
-          Description = "Get the current stock price for a ticker symbol"
-          Execute = fun ticker ->
-              let price =
-                  match ticker.Trim().ToUpper() with
-                  | "AAPL" -> "189.45"
-                  | "MSFT" -> "420.12"
-                  | "GOOGL" -> "175.30"
-                  | t -> sprintf "Unknown ticker: %s" t
-              Task.FromResult(sprintf """{"ticker":"%s","price":%s,"currency":"USD"}""" (ticker.ToUpper()) price) }
+        Tool.Create("get_stock_price", "Get the current stock price for a ticker symbol",
+            fun ticker ->
+                let price =
+                    match ticker.Trim().ToUpper() with
+                    | "AAPL" -> "189.45"
+                    | "MSFT" -> "420.12"
+                    | "GOOGL" -> "175.30"
+                    | t -> sprintf "Unknown ticker: %s" t
+                Task.FromResult(sprintf """{"ticker":"%s","price":%s,"currency":"USD"}""" (ticker.ToUpper()) price))
 
     let sendEmail: Tool =
-        { Name = "send_email"
-          Description = "Send an email to a recipient. Input format: 'to@email.com|subject|body'"
-          Execute = fun input ->
-              let parts = input.Split('|')
-              if parts.Length >= 3 then
-                  Task.FromResult(sprintf "Email sent to %s with subject '%s'" parts.[0] parts.[1])
-              else
-                  Task.FromResult("Error: invalid email format") }
+        Tool.Create("send_email", "Send an email to a recipient. Input format: 'to@email.com|subject|body'",
+            fun input ->
+                let parts = input.Split('|')
+                if parts.Length >= 3 then
+                    Task.FromResult(sprintf "Email sent to %s with subject '%s'" parts.[0] parts.[1])
+                else
+                    Task.FromResult("Error: invalid email format"))
 
     let searchDocs: Tool =
-        { Name = "search_docs"
-          Description = "Search internal documentation. Returns relevant passages."
-          Execute = fun query ->
-              Task.FromResult(sprintf "Found 3 results for '%s': [1] Getting Started Guide [2] API Reference [3] FAQ" query) }
+        Tool.Create("search_docs", "Search internal documentation. Returns relevant passages.",
+            fun query ->
+                Task.FromResult(sprintf "Found 3 results for '%s': [1] Getting Started Guide [2] API Reference [3] FAQ" query))
 
     let dangerousDelete: Tool =
-        { Name = "delete_all_data"
-          Description = "Permanently delete all data. DANGEROUS - requires confirmation."
-          Execute = fun _ -> Task.FromResult("All data deleted permanently") }
+        Tool.Create("delete_all_data", "Permanently delete all data. DANGEROUS - requires confirmation.",
+            fun _ -> Task.FromResult("All data deleted permanently"))
 
     let allTools = [ stockPrice; sendEmail; searchDocs; dangerousDelete ]
 
@@ -696,6 +692,7 @@ type EtclovgFullIntegrationTests() =
         let config : EtclovgConfig =
             { Execution = sandbox
               ToolProtocol = None
+              ExecutionJournal = None
               MemoryConfig = OrchestratorMemoryConfig.None
               Lifecycle = [ lifecycleHook ]
               Tracer = Some tracer

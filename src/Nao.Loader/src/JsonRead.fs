@@ -124,11 +124,74 @@ module JsonRead =
           Options = completionOptions optionsElem
           MaxRounds = intVal elem "max_rounds" 5 }
 
+    let private toolExecution (elem: JsonElement) (prefix: string) : ToolExecutionDef option =
+        let mode =
+            if prefix = "" then str elem "mode"
+            else str elem (prefix + "_mode")
+        let cmd =
+            if prefix = "" then str elem "command"
+            else str elem (prefix + "_command")
+        let url =
+            if prefix = "" then str elem "url"
+            else str elem (prefix + "_url")
+        let executor =
+            if prefix = "" then str elem "executor"
+            else str elem (prefix + "_executor")
+
+        match mode with
+        | "http" ->
+            let httpMethod =
+                if prefix = "" then str elem "method"
+                else str elem (prefix + "_method")
+            let method = if httpMethod = "" then "POST" else httpMethod
+            let headers =
+                if prefix = "" then strMap elem "headers"
+                else strMap elem (prefix + "_headers")
+            Some (ToolExecutionDef.Http (url, method, headers))
+        | "custom" ->
+            let config =
+                if prefix = "" then strMap elem "config"
+                else strMap elem (prefix + "_config")
+            Some (ToolExecutionDef.Custom (executor, config))
+        | "process" ->
+            let args =
+                if prefix = "" then strArray elem "args"
+                else strArray elem (prefix + "_args")
+            Some (ToolExecutionDef.Process (cmd, args))
+        | _ ->
+            // Default: if "command" is present, treat as process
+            if cmd <> "" then
+                let args =
+                    if prefix = "" then strArray elem "args"
+                    else strArray elem (prefix + "_args")
+                Some (ToolExecutionDef.Process (cmd, args))
+            elif url <> "" then
+                let httpMethod =
+                    if prefix = "" then str elem "method"
+                    else str elem (prefix + "_method")
+                let method = if httpMethod = "" then "POST" else httpMethod
+                let headers =
+                    if prefix = "" then strMap elem "headers"
+                    else strMap elem (prefix + "_headers")
+                Some (ToolExecutionDef.Http (url, method, headers))
+            elif executor <> "" then
+                let config =
+                    if prefix = "" then strMap elem "config"
+                    else strMap elem (prefix + "_config")
+                Some (ToolExecutionDef.Custom (executor, config))
+            else
+                None
+
     let toolDef (elem: JsonElement) : ToolDef =
+        let execution =
+            toolExecution elem ""
+            |> Option.defaultValue (ToolExecutionDef.Process (str elem "command", strArray elem "args"))
         { Name = str elem "name"
           Description = str elem "description"
-          Command = str elem "command"
-          Args = strArray elem "args" }
+          Execution = execution
+          OutputContentType = str elem "output_content_type"
+          VerifyExecution = toolExecution elem "verify"
+          RevertExecution = toolExecution elem "revert" }
 
     let evaluatorRef (elem: JsonElement) : EvaluatorRef =
         { Type = str elem "type"

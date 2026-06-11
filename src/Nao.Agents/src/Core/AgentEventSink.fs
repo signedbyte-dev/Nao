@@ -55,6 +55,8 @@ module AgentEventSink =
                     printfn "[%s] [INFO] [%s] Invoking tool: %s(%s)" ts source name input
                 | AgentEvent.ToolResult (name, result) ->
                     printfn "[%s] [INFO] [%s] Tool result from %s: %s" ts source name (result.Substring(0, min 100 result.Length))
+                | AgentEvent.ToolVerifyFailed (name, reason) ->
+                    printfn "[%s] [WARN] [%s] Tool verify failed for %s: %s" ts source name reason
                 | AgentEvent.DelegatingToAgent (name, input) ->
                     printfn "[%s] [INFO] [%s] Delegating to agent: %s" ts source name
                 | AgentEvent.AgentResult (name, result) ->

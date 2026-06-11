@@ -11,6 +11,8 @@ type EtclovgConfig =
       Execution: SandboxConfig
       /// T — Tool Interface: protocol for tool discovery and invocation
       ToolProtocol: IToolProtocol option
+      /// T — Execution journal for tracking tool calls (revert support)
+      ExecutionJournal: IExecutionJournal option
       /// C — Context & Memory: tiered memory configuration
       MemoryConfig: OrchestratorMemoryConfig
       /// L — Lifecycle: hooks and pipeline stages
@@ -34,6 +36,7 @@ type EtclovgConfig =
     static member Default =
         { Execution = SandboxConfig.Default
           ToolProtocol = None
+          ExecutionJournal = None
           MemoryConfig = OrchestratorMemoryConfig.None
           Lifecycle = []
           Tracer = None
