@@ -9,6 +9,10 @@ open Nao.Agents
 open Nao.Loader
 open Nao.Runtime.Orleans
 
+// Allow the Orleans C# codegen project to access internal F# DU backing fields.
+[<assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Nao.Runtime.Orleans.Codegen")>]
+do ()
+
 /// Metadata about a session
 [<GenerateSerializer>]
 type SessionInfo() =

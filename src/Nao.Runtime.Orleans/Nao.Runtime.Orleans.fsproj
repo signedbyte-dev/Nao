@@ -5,12 +5,9 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="src/Serialization/FSharpSerialization.fs" />
     <Compile Include="src/Workspace/WorkspaceRegistry.fs" />
     <Compile Include="src/Grains/GrainState.fs" />
     <Compile Include="src/Grains/SessionGrain.fs" />
-    <Compile Include="src/Grains/SessionDirectoryGrain.fs" />
-    <Compile Include="src/Grains/GroupDirectoryGrain.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Nao.Agents\Nao.Agents.fsproj" />

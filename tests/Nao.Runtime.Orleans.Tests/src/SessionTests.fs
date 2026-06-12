@@ -189,18 +189,3 @@ type WorkspaceResolutionTests() =
         Assert.IsTrue(found.IsSome)
         let result = found.Value.Execute("World").Result
         Assert.AreEqual("Hello World", result)
-
-[<TestClass>]
-type SessionDirectoryStateTests() =
-
-    [<TestMethod>]
-    member _.SessionEntry_HasCorrectDefaults() =
-        let entry = SessionEntry()
-        Assert.AreEqual("", entry.SessionId)
-        Assert.AreEqual("", entry.AgentName)
-        Assert.AreEqual(true, entry.IsActive)
-
-    [<TestMethod>]
-    member _.SessionDirectoryState_StartsEmpty() =
-        let state = SessionDirectoryState()
-        Assert.AreEqual(0, state.Sessions.Count)
