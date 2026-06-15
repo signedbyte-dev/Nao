@@ -1,0 +1,7 @@
+Avalonia
+Avalonia.Desktop
+Avalonia.Themes.Fluent
+Avalonia.FuncUI
+Microsoft.Orleans.Server
+Microsoft.Orleans.Persistence.AdoNet
+Microsoft.Data.Sqlite

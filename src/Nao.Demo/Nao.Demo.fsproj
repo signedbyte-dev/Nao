@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="src/DemoTools.fs" />
+    <Compile Include="src/Contracts.fs" />
+    <Compile Include="src/NaoClient.fs" />
+    <Compile Include="src/AppSettings.fs" />
+    <Compile Include="src/EmbeddedServer.fs" />
+    <Compile Include="src/SessionView.fs" />
+    <Compile Include="src/SettingsView.fs" />
+    <Compile Include="src/Shell.fs" />
     <Compile Include="src/Program.fs" />
   </ItemGroup>
   <ItemGroup>
@@ -19,5 +26,5 @@
     <ProjectReference Include="..\Nao.Runtime.Orleans\Nao.Runtime.Orleans.fsproj" />
     <ProjectReference Include="..\Nao.Runtime.Orleans.Codegen\Nao.Runtime.Orleans.Codegen.csproj" />
   </ItemGroup>
-  <Import Project="..\..\\.paket\Paket.Restore.targets" />
+  <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

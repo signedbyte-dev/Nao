@@ -5,6 +5,13 @@ storage: none
 nuget Microsoft.Orleans.Sdk
 nuget Microsoft.Orleans.Server
 nuget Microsoft.Orleans.Client
+nuget Microsoft.Orleans.Persistence.AdoNet
+nuget Microsoft.Data.Sqlite
+nuget Avalonia ~> 11.3
+nuget Avalonia.Desktop ~> 11.3
+nuget Avalonia.Themes.Fluent ~> 11.3
+nuget Avalonia.FuncUI
+nuget Tmds.DBus.Protocol >= 0.21.3 < 0.92
 
 group Test
   source https://api.nuget.org/v3/index.json
