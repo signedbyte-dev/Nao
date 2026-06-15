@@ -38,7 +38,6 @@ module Router =
                 | Some agent -> return! agent.RunAsync input
                 | None -> return sprintf "Agent '%s' not found" (selectedName.Trim())
             | RoundRobin ->
-                // Simple: pick first agent (stateless round-robin needs external state)
                 match router.Agents with
                 | agent :: _ -> return! agent.RunAsync input
                 | [] -> return "No agents available"

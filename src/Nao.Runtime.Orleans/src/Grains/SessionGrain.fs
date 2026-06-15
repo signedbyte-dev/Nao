@@ -118,7 +118,8 @@ type SessionGrain
     (
         [<PersistentState("sessionState", "sessionStore")>] persistentState: IPersistentState<SessionGrainState>,
         registry: IWorkspaceRegistry,
-        provider: ILlmProvider
+        provider: ILlmProvider,
+        orchestratorFactory: IOrchestratorFactory
     ) =
     inherit Grain()
 
@@ -209,9 +210,9 @@ type SessionGrain
                 def.SubAgents
                 |> List.choose (fun subName ->
                     match findAgentDef workspace subName with
-                    | Some subDef -> Some (DefinitionBuilder.buildAgent provider [] [] subDef)
+                    | Some subDef -> Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider [] [] subDef)
                     | None -> findBuiltAgent workspace subName)
-            Some (DefinitionBuilder.buildAgent provider tools subAgents def)
+            Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider tools subAgents def)
         | None ->
             findBuiltAgent workspace name
 

@@ -353,6 +353,15 @@ module EmbeddedServer =
     let mutable private host: WebApplication option = None
     let mutable private cts: CancellationTokenSource option = None
 
+    /// Mutable handler for tool confirmation requests.
+    /// The UI layer sets this to show a popup dialog.
+    let mutable confirmationHandler: ToolConfirmationRequest -> unit =
+        fun req -> req.Completion.TrySetResult(true) |> ignore
+
+    /// Set the handler that will be called when the orchestrator needs tool confirmation.
+    let setConfirmationHandler (handler: ToolConfirmationRequest -> unit) =
+        confirmationHandler <- handler
+
     /// Start the embedded server on a background thread. Returns the base URL.
     let start (settings: AppSettings) : string =
         let port = 5000
@@ -399,6 +408,9 @@ module EmbeddedServer =
                 let registry = WorkspaceRegistry()
                 registry.Register(WorkspaceId.defaultId, merged)
                 registry :> IWorkspaceRegistry) |> ignore
+
+            builder.Services.AddSingleton<IOrchestratorFactory>(fun _ ->
+                DemoOrchestratorFactory(fun req -> confirmationHandler req) :> IOrchestratorFactory) |> ignore
 
             let app = builder.Build()
             app.UseWebSockets() |> ignore

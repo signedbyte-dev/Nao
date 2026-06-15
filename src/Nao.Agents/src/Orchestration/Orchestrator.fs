@@ -42,106 +42,33 @@ type OrchestratorConfig =
       /// Event sink for logging, progress, and conversation tracking
       EventSink: IAgentEventSink
       /// Memory management configuration
-      Memory: OrchestratorMemoryConfig }
+      Memory: OrchestratorMemoryConfig
+      /// Custom instructions appended to the system prompt (replaces default action format instructions when set)
+      Instructions: string option }
+
+/// Factory interface for creating orchestrator instances via DI.
+/// Register a custom implementation to control how orchestrators are built from workspace definitions.
+type IOrchestratorFactory =
+    /// Create an orchestrator (as IAgent) from the given configuration.
+    abstract member Create: OrchestratorConfig -> IAgent
 
 /// The fundamental orchestrator agent.
 /// Accepts user input, uses an LLM to decide which tool or sub-agent to invoke,
 /// executes the action, feeds results back, and produces a final response.
-type Orchestrator(config: OrchestratorConfig) =
+/// Subclass and override virtual members to customize behavior.
+[<AbstractClass>]
+type OrchestratorBase(config: OrchestratorConfig) =
     let id = { Name = "orchestrator"; Description = "Routes requests to tools and sub-agents" }
     let mutable state = AgentState.Empty
-
-    let buildSystemPrompt () =
-        let toolDescriptions =
-            config.Tools
-            |> List.map (fun t -> sprintf "  - %s: %s" t.Name t.Description)
-            |> String.concat "\n"
-
-        let agentDescriptions =
-            config.SubAgents
-            |> List.map (fun a -> sprintf "  - %s: %s" a.Id.Name a.Id.Description)
-            |> String.concat "\n"
-
-        let basePrompt = Prompt.render config.Prompt
-
-        let capabilities =
-            [ if config.Tools.Length > 0 then
-                yield sprintf "# Available Tools\n%s" toolDescriptions
-              if config.SubAgents.Length > 0 then
-                yield sprintf "# Available Agents\n%s" agentDescriptions ]
-            |> String.concat "\n\n"
-
-        let instructions = """
-# Action Format
-When you need to use a tool, respond with EXACTLY this JSON format on a single line:
-{"action":"tool","name":"<tool_name>","input":"<input_string>"}
-
-When you need to delegate to a sub-agent, respond with EXACTLY this JSON format:
-{"action":"delegate","name":"<agent_name>","input":"<input_string>"}
-
-When you have enough information to answer the user directly, just respond normally with your answer.
-Do NOT wrap your final answer in the action JSON format above. Only use the action JSON when invoking a tool or delegating.
-If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown, YAML), encode your final answer in that format."""
-
-        sprintf "%s\n\n%s\n%s" basePrompt capabilities instructions
-
-    let tryParseAction (content: string) : AgentAction option =
-        let trimmed = content.Trim()
-        if trimmed.StartsWith("{\"action\"") then
-            try
-                use doc = JsonDocument.Parse(trimmed)
-                let root = doc.RootElement
-
-                let getValue (key: string) =
-                    match root.TryGetProperty(key) with
-                    | true, elem when elem.ValueKind = JsonValueKind.String -> Some (elem.GetString())
-                    | _ -> None
-
-                match getValue "action" with
-                | Some "tool" ->
-                    match getValue "name", getValue "input" with
-                    | Some name, Some input -> Some (InvokeTool (name, input))
-                    | Some name, None -> Some (InvokeTool (name, ""))
-                    | _ -> None
-                | Some "delegate" ->
-                    match getValue "name", getValue "input" with
-                    | Some name, Some input -> Some (DelegateToAgent (name, input))
-                    | Some name, None -> Some (DelegateToAgent (name, ""))
-                    | _ -> None
-                | Some actionValue ->
-                    // Fallback: small models sometimes emit {"action":"<tool_name>","input":"..."}
-                    // instead of {"action":"tool","name":"<tool_name>","input":"..."}
-                    let isKnownTool = config.Tools |> List.exists (fun t -> t.Name = actionValue)
-                    let isKnownAgent = config.SubAgents |> List.exists (fun a -> a.Id.Name = actionValue)
-                    if isKnownTool then
-                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
-                        Some (InvokeTool (actionValue, input))
-                    elif isKnownAgent then
-                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
-                        Some (DelegateToAgent (actionValue, input))
-                    else None
-                | None -> None
-            with _ -> None
-        else
-            None
-
-    let findTool name =
-        config.Tools |> List.tryFind (fun t -> t.Name = name)
-
-    let findAgent name =
-        config.SubAgents |> List.tryFind (fun a -> a.Id.Name = name)
 
     let emit event = config.EventSink.Emit event
 
     let applyWindowAsync (conversation: Conversation) : Task<Conversation> =
         task {
-            // First try summarization (which uses the LLM)
             let! afterSummary =
                 match config.Memory.Summarization with
                 | Some summarizationConfig -> Summarizer.applyAsync summarizationConfig conversation
                 | Option.None -> Task.FromResult conversation
-
-            // Then apply windowing strategy
             return
                 match config.Memory.WindowStrategy with
                 | Some strategy -> ConversationWindow.apply strategy afterSummary
@@ -165,15 +92,109 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
             | Option.None -> return ""
         }
 
-    member private _.RunCore(input: string) : Task<string> =
+    /// The orchestrator configuration.
+    member _.Config = config
+
+    /// Default action parsing logic. Can be called by subclasses that cannot use base in task CEs.
+    member _.DefaultTryParseAction(content: string) : AgentAction option =
+        let trimmed = content.Trim()
+        if trimmed.StartsWith("{\"action\"") then
+            try
+                use doc = JsonDocument.Parse(trimmed)
+                let root = doc.RootElement
+
+                let getValue (key: string) =
+                    match root.TryGetProperty(key) with
+                    | true, elem when elem.ValueKind = JsonValueKind.String -> Some (elem.GetString())
+                    | _ -> None
+
+                match getValue "action" with
+                | Some "tool" ->
+                    match getValue "name", getValue "input" with
+                    | Some name, Some input -> Some (InvokeTool (name, input))
+                    | Some name, None -> Some (InvokeTool (name, ""))
+                    | _ -> None
+                | Some "delegate" ->
+                    match getValue "name", getValue "input" with
+                    | Some name, Some input -> Some (DelegateToAgent (name, input))
+                    | Some name, None -> Some (DelegateToAgent (name, ""))
+                    | _ -> None
+                | Some actionValue ->
+                    let isKnownTool = config.Tools |> List.exists (fun t -> t.Name = actionValue)
+                    let isKnownAgent = config.SubAgents |> List.exists (fun a -> a.Id.Name = actionValue)
+                    if isKnownTool then
+                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
+                        Some (InvokeTool (actionValue, input))
+                    elif isKnownAgent then
+                        let input = getValue "input" |> Option.orElse (getValue "name") |> Option.defaultValue ""
+                        Some (DelegateToAgent (actionValue, input))
+                    else None
+                | None -> None
+            with _ -> None
+        else
+            None
+
+    /// Override to customize the system prompt generation.
+    abstract member BuildSystemPrompt: unit -> string
+    default _.BuildSystemPrompt() =
+        let toolDescriptions =
+            config.Tools
+            |> List.map (fun t -> sprintf "  - %s: %s" t.Name t.Description)
+            |> String.concat "\n"
+
+        let agentDescriptions =
+            config.SubAgents
+            |> List.map (fun a -> sprintf "  - %s: %s" a.Id.Name a.Id.Description)
+            |> String.concat "\n"
+
+        let basePrompt = Prompt.render config.Prompt
+
+        let capabilities =
+            [ if config.Tools.Length > 0 then
+                yield sprintf "# Available Tools\n%s" toolDescriptions
+              if config.SubAgents.Length > 0 then
+                yield sprintf "# Available Agents\n%s" agentDescriptions ]
+            |> String.concat "\n\n"
+
+        let instructions =
+            match config.Instructions with
+            | Some custom -> custom
+            | None -> """
+# Action Format
+When you need to use a tool, respond with EXACTLY this JSON format on a single line:
+{"action":"tool","name":"<tool_name>","input":"<input_string>"}
+
+When you need to delegate to a sub-agent, respond with EXACTLY this JSON format:
+{"action":"delegate","name":"<agent_name>","input":"<input_string>"}
+
+When you have enough information to answer the user directly, just respond normally with your answer.
+Do NOT wrap your final answer in the action JSON format above. Only use the action JSON when invoking a tool or delegating.
+If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown, YAML), encode your final answer in that format."""
+
+        sprintf "%s\n\n%s\n%s" basePrompt capabilities instructions
+
+    /// Override to customize how LLM output is parsed into an AgentAction.
+    /// Return Some to invoke a tool/agent, None to treat the response as final answer.
+    abstract member TryParseActionAsync: string -> Task<AgentAction option>
+    default this.TryParseActionAsync(content: string) =
+        this.DefaultTryParseAction(content) |> Task.FromResult
+
+    /// Override to add custom logic after a tool executes.
+    abstract member OnToolResult: toolName: string * input: string * result: string -> unit
+    default _.OnToolResult(_, _, _) = ()
+
+    /// Override to add custom logic after an agent round completes.
+    abstract member OnRoundComplete: round: int * content: string -> unit
+    default _.OnRoundComplete(_, _) = ()
+
+    member private this.RunCore(input: string) : Task<string> =
         task {
             let! memoryContext = getMemoryContext ()
-            let systemContent = buildSystemPrompt () + memoryContext
+            let systemContent = this.BuildSystemPrompt() + memoryContext
             let systemMsg = { Role = System; Content = systemContent }
             let userMsg = { Role = User; Content = input }
             emit (AgentEvent.MessageAdded (User, input))
 
-            // Apply windowing to prior conversation before appending new messages
             let! windowedHistory = applyWindowAsync state.Conversation
             let mutable conversation = windowedHistory @ [ systemMsg; userMsg ]
             let mutable rounds = 0
@@ -187,14 +208,15 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                 conversation <- conversation @ [ assistantMsg ]
                 emit (AgentEvent.MessageAdded (Assistant, result.Content))
 
-                match tryParseAction result.Content with
+                let! parsedAction = this.TryParseActionAsync(result.Content)
+                match parsedAction with
                 | Some (InvokeTool (toolName, toolInput)) ->
                     emit (AgentEvent.InvokingTool (toolName, toolInput))
-                    match findTool toolName with
+                    match config.Tools |> List.tryFind (fun t -> t.Name = toolName) with
                     | Some tool ->
                         let! toolResult = tool.Execute toolInput
                         emit (AgentEvent.ToolResult (toolName, toolResult))
-                        // Run Verify if available — inject failure back so LLM can retry
+                        this.OnToolResult(toolName, toolInput, toolResult)
                         let! verifyMsg =
                             match tool.Verify with
                             | Some verify ->
@@ -223,7 +245,7 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
 
                 | Some (DelegateToAgent (agentName, agentInput)) ->
                     emit (AgentEvent.DelegatingToAgent (agentName, agentInput))
-                    match findAgent agentName with
+                    match config.SubAgents |> List.tryFind (fun a -> a.Id.Name = agentName) with
                     | Some agent ->
                         let! agentResult = agent.RunAsync agentInput
                         emit (AgentEvent.AgentResult (agentName, agentResult))
@@ -236,13 +258,12 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                         conversation <- conversation @ [ errMsg ]
 
                 | Some (DelegateToAgent _) | Some (Think _) | Some (Respond _) | None ->
-                    // No action parsed — this is the final answer
                     finalAnswer <- result.Content
                     finished <- true
 
+                this.OnRoundComplete(rounds + 1, if finished then finalAnswer else "")
                 rounds <- rounds + 1
 
-            // If we exhausted rounds without a final answer, do one more call
             if not finished then
                 emit (AgentEvent.MaxRoundsReached config.MaxRounds)
                 let forceMsg = { Role = User; Content = "[System]: Maximum rounds reached. Please provide your final answer now." }
@@ -252,7 +273,6 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                 conversation <- conversation @ [ { Role = Assistant; Content = result.Content } ]
 
             emit (AgentEvent.Completed finalAnswer)
-            // Store the full conversation (without system prompt) for future windowing
             let historyMessages =
                 conversation
                 |> List.filter (fun m -> m.Role <> System)
@@ -269,6 +289,11 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
                 let! response = this.RunCore(msg.Content)
                 return Some (AgentMessage.create id msg.From response)
             }
+
+
+/// Default orchestrator implementation using the base class with no overrides.
+type Orchestrator(config: OrchestratorConfig) =
+    inherit OrchestratorBase(config)
 
 module Orchestrator =
 
@@ -293,10 +318,18 @@ module Orchestrator =
               Options = { CompletionOptions.Default with Temperature = 0.1 }
               MaxRounds = 5
               EventSink = AgentEventSink.none
-              Memory = OrchestratorMemoryConfig.None }
+              Memory = OrchestratorMemoryConfig.None
+              Instructions = None }
 
         Orchestrator(config) :> IAgent
 
     /// Create an orchestrator with a custom configuration
     let createWithConfig (config: OrchestratorConfig) =
         Orchestrator(config) :> IAgent
+
+
+/// Default factory that creates standard Orchestrator instances.
+/// Replace via DI to use a custom subclass of OrchestratorBase.
+type DefaultOrchestratorFactory() =
+    interface IOrchestratorFactory with
+        member _.Create(config) = Orchestrator(config) :> IAgent

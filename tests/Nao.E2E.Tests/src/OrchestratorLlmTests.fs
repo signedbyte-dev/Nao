@@ -256,7 +256,8 @@ type OrchestratorWithMockProviderTests() =
               Options = CompletionOptions.Default
               MaxRounds = 3
               EventSink = AgentEventSink.none
-              Memory = OrchestratorMemoryConfig.None }
+              Memory = OrchestratorMemoryConfig.None
+              Instructions = None }
 
         let orchestrator = Orchestrator.createWithConfig config
         let result = (orchestrator.RunAsync "Loop me").Result

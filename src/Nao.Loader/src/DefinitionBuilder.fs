@@ -133,9 +133,10 @@ module DefinitionBuilder =
           Options = def.Options
           MaxRounds = def.MaxRounds
           EventSink = AgentEventSink.none
-          Memory = OrchestratorMemoryConfig.None }
+          Memory = OrchestratorMemoryConfig.None
+          Instructions = None }
 
-    /// Build an IAgent from an AgentDef
+    /// Build an IAgent from an AgentDef using the provided factory (or default Orchestrator).
     let buildAgent
         (provider: ILlmProvider)
         (tools: Tool list)
@@ -144,6 +145,17 @@ module DefinitionBuilder =
         : IAgent =
         let config = buildOrchestratorConfig provider tools subAgents def
         Orchestrator.createWithConfig config
+
+    /// Build an IAgent from an AgentDef using a custom factory.
+    let buildAgentWithFactory
+        (factory: IOrchestratorFactory)
+        (provider: ILlmProvider)
+        (tools: Tool list)
+        (subAgents: IAgent list)
+        (def: AgentDef)
+        : IAgent =
+        let config = buildOrchestratorConfig provider tools subAgents def
+        factory.Create config
 
     /// Build an EvalDataset from an EvalSuiteDef
     let buildEvalDataset (def: EvalSuiteDef) : EvalDataset =

@@ -22,6 +22,7 @@ The framework implements the **ETCLOVG** taxonomy from "Agent Harness Engineerin
 
 - **ETCLOVG Harness** — Seven-layer execution pipeline with resource bounds, governance, observability, and verification
 - **Multi-Agent Orchestration** — Router, Pipeline, and AgentGroup patterns for composing agents
+- **Extensible Orchestrator** — Abstract base class with virtual members (`TryParseAction`, `BuildSystemPrompt`) for custom behavior via inheritance and DI
 - **Conversation Memory** — Sliding window, token-budget, summarization, and tiered memory strategies
 - **Semantic Memory** — Embedding-based retrieval for long-term agent knowledge
 - **Persistent State** — Orleans grain persistence for conversation history and memories across sessions
@@ -193,6 +194,48 @@ let result = Pipeline.runAsync input pipeline
 let group = AgentGroup.create [ analyst; critic ] (MaxRounds 5)
 let history = AgentGroup.runAsync "Analyze this data" group
 ```
+
+### Custom Orchestrators
+
+The `Orchestrator` uses an abstract base class (`OrchestratorBase`) with virtual members that can be overridden via inheritance. This solves the problem that function-valued fields (like action parsers) cannot be expressed in JSON configuration:
+
+```fsharp
+type MyOrchestrator(config: OrchestratorConfig) =
+    inherit OrchestratorBase(config)
+
+    override _.TryParseAction(content) =
+        // Custom parsing logic for your LLM's output format
+        if content.Contains("<tool>") then
+            Some (InvokeTool ("myTool", content))
+        else
+            None
+
+    override _.BuildSystemPrompt() =
+        "You are a domain-specific assistant. Use XML tags to invoke tools."
+
+    override _.OnToolResult(toolName, input, result) =
+        printfn "Tool %s returned: %s" toolName result
+
+    override _.OnRoundComplete(round, content) =
+        printfn "Round %d complete" round
+```
+
+Register a custom factory via DI to have the runtime use your subclass:
+
+```fsharp
+type MyOrchestratorFactory() =
+    interface IOrchestratorFactory with
+        member _.Create(config) = MyOrchestrator(config) :> IAgent
+```
+
+Available virtual members on `OrchestratorBase`:
+
+| Member | Purpose |
+|--------|---------|
+| `BuildSystemPrompt()` | Customize system prompt generation |
+| `TryParseAction(content)` | Parse LLM output into tool/agent actions |
+| `OnToolResult(name, input, result)` | Hook after tool execution |
+| `OnRoundComplete(round, content)` | Hook after each reasoning round |
 
 ### Memory Management
 
@@ -487,4 +530,4 @@ A pre-commit hook ensures all tests pass before commits are accepted. It runs `d
 
 ## License
 
-TBD
+MIT

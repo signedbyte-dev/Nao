@@ -15,7 +15,6 @@
     <Compile Include="src/Prompts/Prompt.fs" />
     <Compile Include="src/Core/AgentId.fs" />
     <Compile Include="src/Messaging/AgentMessage.fs" />
-    <Compile Include="src/Core/AgentConfig.fs" />
     <Compile Include="src/Logging/LogLevel.fs" />
     <Compile Include="src/Logging/LogEntry.fs" />
     <Compile Include="src/Logging/AgentLogger.fs" />
@@ -70,8 +69,6 @@
 
     <!-- Harness (integrates all layers) -->
     <Compile Include="src/Harness/HarnessResult.fs" />
-    <Compile Include="src/Harness/HarnessConfig.fs" />
-    <Compile Include="src/Harness/AgentHarness.fs" />
     <Compile Include="src/Harness/EtclovgHarness.fs" />
   </ItemGroup>
 

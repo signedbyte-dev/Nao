@@ -479,7 +479,8 @@ type WorkspaceE2ETests() =
               Options = CompletionOptions.Default
               MaxRounds = 10
               EventSink = AgentEventSink.none
-              Memory = OrchestratorMemoryConfig.None }
+              Memory = OrchestratorMemoryConfig.None
+              Instructions = None }
 
         let agent = Orchestrator.createWithConfig config
         let response = agent.RunAsync("Create a project folder with a README file").Result
@@ -537,7 +538,8 @@ type WorkspaceE2ETests() =
               Options = CompletionOptions.Default
               MaxRounds = 10
               EventSink = AgentEventSink.none
-              Memory = OrchestratorMemoryConfig.None }
+              Memory = OrchestratorMemoryConfig.None
+              Instructions = None }
 
         let agent = Orchestrator.createWithConfig orchestratorConfig
         agent.RunAsync("Create a project folder with README").Result |> ignore
@@ -585,7 +587,8 @@ type WorkspaceE2ETests() =
               Options = CompletionOptions.Default
               MaxRounds = 8
               EventSink = AgentEventSink.none
-              Memory = OrchestratorMemoryConfig.None }
+              Memory = OrchestratorMemoryConfig.None
+              Instructions = None }
 
         let agent = Orchestrator.createWithConfig config
         let response = agent.RunAsync("Use the echo tool and then create a folder").Result

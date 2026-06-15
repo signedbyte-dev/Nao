@@ -42,7 +42,6 @@ module AgentGroup =
         task {
             let history = ResizeArray<AgentMessage>()
 
-            // Seed the conversation
             let seedId = { Name = "user"; Description = "Initial input" }
             let seed = AgentMessage.broadcast seedId input
             history.Add(seed)

@@ -86,6 +86,21 @@ Agent lifecycle state machine and multi-stage pipelines:
 - `ILifecycleHook` — OnBeforeInit, OnBeforeStep, OnCompleted, OnFailed
 - `LifecyclePipeline` — Multi-stage execution with validation and `RetryPolicy`
 - `Router`, `Pipeline`, `AgentGroup` — Multi-agent orchestration patterns
+- `OrchestratorBase` — Abstract class with virtual members for custom orchestration behavior
+- `IOrchestratorFactory` — DI interface to control orchestrator instantiation
+
+#### Custom Orchestrators
+
+The orchestrator's behavior can be customized by subclassing `OrchestratorBase` and overriding virtual members:
+
+| Virtual Member | Purpose |
+|----------------|---------|
+| `BuildSystemPrompt()` | Generate the system prompt sent to the LLM |
+| `TryParseAction(content)` | Parse LLM output into `AgentAction` (tool call, delegation, or final answer) |
+| `OnToolResult(name, input, result)` | Post-processing hook after a tool executes |
+| `OnRoundComplete(round, content)` | Hook called after each reasoning round |
+
+This pattern exists because function-valued behavior (like custom action parsers) cannot be expressed in JSON workspace definitions. Users subclass `OrchestratorBase` and register an `IOrchestratorFactory` via DI to have the runtime use their custom orchestrator.
 
 ### O — Observability & Operations
 
