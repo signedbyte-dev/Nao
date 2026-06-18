@@ -22,6 +22,10 @@ NUGET
     Avalonia.FuncUI (2.0.0-preview1)
       Avalonia (>= 12.0) - restriction: >= net8.0
       FSharp.Core (>= 6.0) - restriction: >= net8.0
+    Avalonia.FuncUI.Elmish (1.6)
+      Avalonia.FuncUI (>= 1.6) - restriction: >= net8.0
+      Elmish (>= 4.3) - restriction: >= net8.0
+      FSharp.Core (>= 6.0) - restriction: >= net8.0
     Avalonia.HarfBuzz (12.0.4) - restriction: >= net8.0
       Avalonia (>= 12.0.4) - restriction: >= net8.0
       HarfBuzzSharp (>= 8.3.1.3) - restriction: >= net8.0
@@ -48,6 +52,7 @@ NUGET
       Avalonia.FreeDesktop (>= 12.0.4) - restriction: >= net8.0
       Avalonia.FreeDesktop.AtSpi (>= 12.0.4) - restriction: >= net8.0
       Avalonia.Skia (>= 12.0.4) - restriction: >= net8.0
+    Elmish (5.0.2) - restriction: >= net8.0
     FSharp.Core (10.1.301) - restriction: >= net8.0
     HarfBuzzSharp (8.3.1.5) - restriction: >= net8.0
       HarfBuzzSharp.NativeAssets.macOS (>= 8.3.1.5) - restriction: || (&& (>= net10.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0) (< net9.0-windows10.0.19041.0)) (>= net10.0-macos) (>= net462) (&& (>= net6.0) (< net9.0)) (&& (< net6.0) (>= netstandard2.1)) (>= net9.0-macos) (&& (>= netstandard2.0) (< netstandard2.1))

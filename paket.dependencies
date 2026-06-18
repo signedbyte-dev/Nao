@@ -11,6 +11,7 @@ nuget Avalonia
 nuget Avalonia.Desktop
 nuget Avalonia.Themes.Fluent
 nuget Avalonia.FuncUI 2.0.0-preview1
+nuget Avalonia.FuncUI.Elmish
 nuget Tmds.DBus.Protocol 0.92.0
 
 group Test

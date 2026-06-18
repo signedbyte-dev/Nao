@@ -51,6 +51,21 @@ type ErrorResponse =
     { [<JsonPropertyName("error")>]
       Error: string }
 
+[<CLIMutable>]
+type SessionListEntry =
+    { [<JsonPropertyName("sessionId")>]
+      SessionId: string
+      [<JsonPropertyName("agentName")>]
+      AgentName: string
+      [<JsonPropertyName("title")>]
+      Title: string
+      [<JsonPropertyName("createdAt")>]
+      CreatedAt: DateTimeOffset
+      [<JsonPropertyName("lastActiveAt")>]
+      LastActiveAt: DateTimeOffset
+      [<JsonPropertyName("isActive")>]
+      IsActive: bool }
+
 // === WebSocket Protocol ===
 // Client sends WsRequest, Server sends WsResponse
 // All frames are JSON with a "type" string field

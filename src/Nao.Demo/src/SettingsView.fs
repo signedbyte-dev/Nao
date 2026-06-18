@@ -14,8 +14,13 @@ module SettingsView =
           IsDirty: bool
           StatusMessage: string }
 
-    let view (state: IWritable<SettingsState>) (onClose: unit -> unit) =
-        let s = state.Current.Settings
+    type Msg =
+        | SettingsChanged of AppSettings
+        | Save
+        | Close
+
+    let view (dispatch: Msg -> unit) (model: SettingsState) : Avalonia.FuncUI.Types.IView =
+        let s = model.Settings
 
         ScrollViewer.create [
             ScrollViewer.padding (20.0, 16.0)
@@ -31,7 +36,7 @@ module SettingsView =
                                 Button.create [
                                     Button.dock Dock.Right
                                     Button.content "Close"
-                                    Button.onClick (fun _ -> onClose ())
+                                    Button.onClick (fun _ -> dispatch Close)
                                 ]
                                 TextBlock.create [
                                     TextBlock.text "Settings"
@@ -70,9 +75,7 @@ module SettingsView =
                                                     TextBox.text s.Provider.ProviderType
                                                     TextBox.width 200.0
                                                     TextBox.onTextChanged (fun v ->
-                                                        state.Set { state.Current with
-                                                                        Settings = { s with Provider = { s.Provider with ProviderType = v } }
-                                                                        IsDirty = true })
+                                                        dispatch (SettingsChanged { s with Provider = { s.Provider with ProviderType = v } }))
                                                 ]
                                             ]
                                         ]
@@ -90,9 +93,7 @@ module SettingsView =
                                                     TextBox.text s.Provider.Endpoint
                                                     TextBox.width 300.0
                                                     TextBox.onTextChanged (fun v ->
-                                                        state.Set { state.Current with
-                                                                        Settings = { s with Provider = { s.Provider with Endpoint = v } }
-                                                                        IsDirty = true })
+                                                        dispatch (SettingsChanged { s with Provider = { s.Provider with Endpoint = v } }))
                                                 ]
                                             ]
                                         ]
@@ -110,9 +111,7 @@ module SettingsView =
                                                     TextBox.text s.Provider.Model
                                                     TextBox.width 200.0
                                                     TextBox.onTextChanged (fun v ->
-                                                        state.Set { state.Current with
-                                                                        Settings = { s with Provider = { s.Provider with Model = v } }
-                                                                        IsDirty = true })
+                                                        dispatch (SettingsChanged { s with Provider = { s.Provider with Model = v } }))
                                                 ]
                                             ]
                                         ]
@@ -153,9 +152,7 @@ module SettingsView =
                                                     NumericUpDown.width 100.0
                                                     NumericUpDown.onValueChanged (fun v ->
                                                         if v.HasValue then
-                                                            state.Set { state.Current with
-                                                                            Settings = { s with Orchestrator = { s.Orchestrator with MaxRounds = int v.Value } }
-                                                                            IsDirty = true })
+                                                            dispatch (SettingsChanged { s with Orchestrator = { s.Orchestrator with MaxRounds = int v.Value } }))
                                                 ]
                                             ]
                                         ]
@@ -177,9 +174,7 @@ module SettingsView =
                                                     NumericUpDown.width 100.0
                                                     NumericUpDown.onValueChanged (fun v ->
                                                         if v.HasValue then
-                                                            state.Set { state.Current with
-                                                                            Settings = { s with Orchestrator = { s.Orchestrator with Temperature = float v.Value } }
-                                                                            IsDirty = true })
+                                                            dispatch (SettingsChanged { s with Orchestrator = { s.Orchestrator with Temperature = float v.Value } }))
                                                 ]
                                             ]
                                         ]
@@ -200,9 +195,7 @@ module SettingsView =
                                                     ComboBox.onSelectedItemChanged (fun item ->
                                                         match item with
                                                         | :? string as v ->
-                                                            state.Set { state.Current with
-                                                                            Settings = { s with Orchestrator = { s.Orchestrator with WindowStrategy = v } }
-                                                                            IsDirty = true }
+                                                            dispatch (SettingsChanged { s with Orchestrator = { s.Orchestrator with WindowStrategy = v } })
                                                         | _ -> ())
                                                 ]
                                                 NumericUpDown.create [
@@ -213,9 +206,7 @@ module SettingsView =
                                                     NumericUpDown.width 100.0
                                                     NumericUpDown.onValueChanged (fun v ->
                                                         if v.HasValue then
-                                                            state.Set { state.Current with
-                                                                            Settings = { s with Orchestrator = { s.Orchestrator with WindowSize = int v.Value } }
-                                                                            IsDirty = true })
+                                                            dispatch (SettingsChanged { s with Orchestrator = { s.Orchestrator with WindowSize = int v.Value } }))
                                                 ]
                                             ]
                                         ]
@@ -230,9 +221,7 @@ module SettingsView =
                                             TextBox.minHeight 80.0
                                             TextBox.textWrapping TextWrapping.Wrap
                                             TextBox.onTextChanged (fun v ->
-                                                state.Set { state.Current with
-                                                                Settings = { s with Orchestrator = { s.Orchestrator with SystemPrompt = v } }
-                                                                IsDirty = true })
+                                                dispatch (SettingsChanged { s with Orchestrator = { s.Orchestrator with SystemPrompt = v } }))
                                         ]
                                     ]
                                 ]
@@ -267,9 +256,7 @@ module SettingsView =
                                                     TextBox.width 350.0
                                                     TextBox.watermark "Path to .nao workspace folder"
                                                     TextBox.onTextChanged (fun v ->
-                                                        state.Set { state.Current with
-                                                                        Settings = { s with WorkspacePath = v }
-                                                                        IsDirty = true })
+                                                        dispatch (SettingsChanged { s with WorkspacePath = v }))
                                                 ]
                                             ]
                                         ]
@@ -290,13 +277,11 @@ module SettingsView =
                                 Button.create [
                                     Button.dock Dock.Right
                                     Button.content "Save"
-                                    Button.isEnabled state.Current.IsDirty
-                                    Button.onClick (fun _ ->
-                                        AppSettingsStore.save state.Current.Settings
-                                        state.Set { state.Current with IsDirty = false; StatusMessage = "Settings saved." })
+                                    Button.isEnabled model.IsDirty
+                                    Button.onClick (fun _ -> dispatch Save)
                                 ]
                                 TextBlock.create [
-                                    TextBlock.text state.Current.StatusMessage
+                                    TextBlock.text model.StatusMessage
                                     TextBlock.foreground (SolidColorBrush(Color.Parse("#4ADE80")))
                                     TextBlock.verticalAlignment VerticalAlignment.Center
                                 ]

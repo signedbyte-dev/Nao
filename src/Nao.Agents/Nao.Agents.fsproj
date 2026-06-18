@@ -35,6 +35,8 @@
     <Compile Include="src/ToolProtocol/ToolProtocol.fs" />
     <Compile Include="src/ToolProtocol/ExecutionJournal.fs" />
     <Compile Include="src/ToolProtocol/ToolRouter.fs" />
+    <Compile Include="src/ToolProtocol/McpTransport.fs" />
+    <Compile Include="src/ToolProtocol/ToolComposition.fs" />
 
     <!-- C: Context & Memory Management -->
     <Compile Include="src/Memory/ConversationWindow.fs" />
@@ -42,7 +44,15 @@
     <Compile Include="src/Memory/Summarizer.fs" />
     <Compile Include="src/Memory/SemanticMemory.fs" />
     <Compile Include="src/Memory/MemoryTier.fs" />
+    <Compile Include="src/Memory/TieredMemoryImpl.fs" />
+    <Compile Include="src/Memory/GraphMemory.fs" />
+    <Compile Include="src/Memory/EpisodicMemory.fs" />
+    <Compile Include="src/Memory/WorkingMemory.fs" />
+    <Compile Include="src/Memory/MemoryConsolidation.fs" />
     <Compile Include="src/Memory/ContextCompaction.fs" />
+
+    <!-- T: Tool Discovery (depends on Memory types) -->
+    <Compile Include="src/ToolProtocol/ToolDiscovery.fs" />
 
     <!-- L: Lifecycle & Orchestration -->
     <Compile Include="src/Lifecycle/Lifecycle.fs" />

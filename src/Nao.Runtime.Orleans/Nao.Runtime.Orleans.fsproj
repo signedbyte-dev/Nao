@@ -6,7 +6,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="src/Workspace/WorkspaceRegistry.fs" />
+    <Compile Include="src/Storage/ConversationStore.fs" />
+    <Compile Include="src/Storage/FileConversationStore.fs" />
     <Compile Include="src/Grains/GrainState.fs" />
+    <Compile Include="src/Grains/SessionDirectoryGrain.fs" />
     <Compile Include="src/Grains/SessionGrain.fs" />
   </ItemGroup>
   <ItemGroup>

@@ -6,6 +6,7 @@ open Avalonia
 open Avalonia.Controls
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.FuncUI.Hosts
+open Avalonia.FuncUI.Elmish
 open Avalonia.Layout
 open Avalonia.Media
 open Avalonia.Themes.Fluent
@@ -19,7 +20,10 @@ type MainWindow() as this =
         this.Height <- 700.0
         this.MinWidth <- 600.0
         this.MinHeight <- 400.0
-        this.Content <- Shell.view ()
+
+        Elmish.Program.mkProgram Shell.init Shell.update Shell.view
+        |> Program.withHost this
+        |> Elmish.Program.run
 
 type App() =
     inherit Application()
@@ -97,10 +101,6 @@ module Program =
 
     [<EntryPoint>]
     let main argv =
-        // Start the embedded server before launching UI
-        let settings = AppSettingsStore.load ()
-        let _serverUrl = EmbeddedServer.start settings
-
         AppBuilder
             .Configure<App>()
             .UsePlatformDetect()

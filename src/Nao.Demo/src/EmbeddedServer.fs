@@ -3,6 +3,7 @@ namespace Nao.Demo
 open System
 open System.IO
 open System.Net.WebSockets
+open System.Net.Sockets
 open System.Data.Common
 open System.Text
 open System.Text.Json
@@ -21,6 +22,37 @@ open Nao.Loader
 open Nao.Providers
 open Nao.Runtime.Orleans
 open Nao.Runtime.Orleans.Grains
+
+/// Check if an LLM provider endpoint is reachable
+module ProviderHealth =
+
+    let checkAsync (settings: ProviderSettings) : Task<Result<string, string>> =
+        task {
+            try
+                use client = new System.Net.Http.HttpClient()
+                client.Timeout <- TimeSpan.FromSeconds(5.0)
+                match settings.ProviderType.ToLowerInvariant() with
+                | "ollama" ->
+                    let url = if String.IsNullOrWhiteSpace(settings.Endpoint) then "http://localhost:11434" else settings.Endpoint
+                    let! resp = client.GetAsync(url + "/api/tags")
+                    if resp.IsSuccessStatusCode then
+                        return Ok (sprintf "Ollama is running at %s" url)
+                    else
+                        return Error (sprintf "Ollama returned %d at %s" (int resp.StatusCode) url)
+                | "openai" ->
+                    let url = if String.IsNullOrWhiteSpace(settings.Endpoint) then "https://api.openai.com/v1" else settings.Endpoint
+                    let! resp = client.GetAsync(url + "/models")
+                    if int resp.StatusCode < 500 then
+                        return Ok (sprintf "OpenAI endpoint reachable at %s" url)
+                    else
+                        return Error (sprintf "OpenAI endpoint returned %d" (int resp.StatusCode))
+                | "anthropic" ->
+                    return Ok "Anthropic (API key validated at runtime)"
+                | other ->
+                    return Ok (sprintf "Provider '%s' — no health check available" other)
+            with ex ->
+                return Error (sprintf "Cannot reach provider: %s" ex.Message)
+        }
 
 module DemoTools =
 
@@ -129,7 +161,7 @@ module DemoTools =
 
 module Database =
 
-    let private dataDir =
+    let dataDir =
         let dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nao.Desktop")
         Directory.CreateDirectory(dir) |> ignore
         dir
@@ -266,6 +298,28 @@ module Database =
 
 module EmbeddedServer =
 
+    let private waitForListener (port: int) (timeout: TimeSpan) =
+        let deadline = DateTime.UtcNow + timeout
+        let mutable started = false
+        let mutable lastError = "no connection attempt made"
+
+        while not started && DateTime.UtcNow < deadline do
+            try
+                use client = new TcpClient()
+                let connected = client.ConnectAsync("127.0.0.1", port).Wait(TimeSpan.FromMilliseconds(300.0))
+                if connected && client.Connected then
+                    started <- true
+                else
+                    lastError <- "connection attempt timed out"
+            with ex ->
+                lastError <- ex.Message
+
+            if not started then
+                Thread.Sleep(200)
+
+        if not started then
+            failwithf "Embedded server failed to start on localhost:%d within %0.1f seconds (%s)" port timeout.TotalSeconds lastError
+
     let private jsonOptions =
         let opts = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
         opts
@@ -295,8 +349,8 @@ module EmbeddedServer =
             | WsRequestType.History ->
                 let! history = session.GetHistoryAsync()
                 let dtos =
-                    history |> List.map (fun m ->
-                        { MessageDto.Role = (match m.Role with | User -> "user" | Assistant -> "assistant" | _ -> "system")
+                    history |> Array.map (fun m ->
+                        { MessageDto.Role = m.Role.ToLowerInvariant()
                           Content = m.Content })
                 let payload = JsonSerializer.Serialize(dtos, jsonOptions)
                 do! sendWs socket { Type = WsResponseType.History; Payload = payload }
@@ -374,83 +428,133 @@ module EmbeddedServer =
         cts <- Some cancellation
 
         Task.Factory.StartNew((fun () ->
-            let builder = WebApplication.CreateBuilder([||])
+            try
+                let builder = WebApplication.CreateBuilder([||])
 
-            builder.Host.UseOrleans(fun (siloBuilder: ISiloBuilder) ->
-                siloBuilder
-                    .UseLocalhostClustering()
-                    .AddAdoNetGrainStorage("sessionStore", fun (opts: Orleans.Configuration.AdoNetGrainStorageOptions) ->
-                        opts.Invariant <- "System.Data.SQLite"
-                        opts.ConnectionString <- Database.connectionString)
-                    .Configure<ClusterOptions>(fun (opts: ClusterOptions) ->
-                        opts.ClusterId <- "nao-desktop"
-                        opts.ServiceId <- "nao-desktop")
-                |> ignore)
-            |> ignore
+                builder.Host.UseOrleans(fun (siloBuilder: ISiloBuilder) ->
+                    siloBuilder
+                        .UseLocalhostClustering()
+                        .AddAdoNetGrainStorage("sessionStore", fun (opts: Orleans.Configuration.AdoNetGrainStorageOptions) ->
+                            opts.Invariant <- "System.Data.SQLite"
+                            opts.ConnectionString <- Database.connectionString)
+                        .Configure<ClusterOptions>(fun (opts: ClusterOptions) ->
+                            opts.ClusterId <- "nao-desktop"
+                            opts.ServiceId <- "nao-desktop")
+                    |> ignore)
+                |> ignore
 
-            let workspaceRoot =
-                let envPath = Environment.GetEnvironmentVariable("NAO_WORKSPACE")
-                if String.IsNullOrEmpty(envPath) then
-                    Path.Combine(AppContext.BaseDirectory, ".nao")
-                    |> fun p -> Path.GetFullPath(Path.Combine(p, ".."))
-                else envPath
+                let workspaceRoot =
+                    let envPath = Environment.GetEnvironmentVariable("NAO_WORKSPACE")
+                    if String.IsNullOrEmpty(envPath) then
+                        Path.Combine(AppContext.BaseDirectory, ".nao")
+                        |> fun p -> Path.GetFullPath(Path.Combine(p, ".."))
+                    else envPath
 
-            let model = if String.IsNullOrWhiteSpace(settings.Provider.Model) then "llama3.2" else settings.Provider.Model
-            let endpoint = if String.IsNullOrWhiteSpace(settings.Provider.Endpoint) then "http://localhost:11434" else settings.Provider.Endpoint
+                let model = if String.IsNullOrWhiteSpace(settings.Provider.Model) then "llama3.2" else settings.Provider.Model
+                let endpoint = if String.IsNullOrWhiteSpace(settings.Provider.Endpoint) then "http://localhost:11434" else settings.Provider.Endpoint
 
-            builder.Services.AddSingleton<ILlmProvider>(fun _ ->
-                let config = { OllamaConfig.Default with Model = model; BaseUrl = endpoint }
-                ProviderFactory.create (ProviderType.Ollama config)) |> ignore
+                builder.Services.AddSingleton<ILlmProvider>(fun _ ->
+                    let config = { OllamaConfig.Default with Model = model; BaseUrl = endpoint }
+                    ProviderFactory.create (ProviderType.Ollama config)) |> ignore
 
-            builder.Services.AddSingleton<IWorkspaceRegistry>(fun _ ->
-                let workspace = WorkspaceLoader.loadWorkspace workspaceRoot
-                let merged = { workspace with Tools = workspace.Tools @ DemoTools.allTools }
-                let registry = WorkspaceRegistry()
-                registry.Register(WorkspaceId.defaultId, merged)
-                registry :> IWorkspaceRegistry) |> ignore
+                builder.Services.AddSingleton<IWorkspaceRegistry>(fun _ ->
+                    let workspace = WorkspaceLoader.loadWorkspace workspaceRoot
+                    let merged = { workspace with Tools = workspace.Tools @ DemoTools.allTools }
+                    let registry = WorkspaceRegistry()
+                    registry.Register(WorkspaceId.defaultId, merged)
+                    registry :> IWorkspaceRegistry) |> ignore
 
-            builder.Services.AddSingleton<IOrchestratorFactory>(fun _ ->
-                DemoOrchestratorFactory(fun req -> confirmationHandler req) :> IOrchestratorFactory) |> ignore
+                builder.Services.AddSingleton<IOrchestratorFactory>(fun _ ->
+                    DemoOrchestratorFactory(fun req -> confirmationHandler req) :> IOrchestratorFactory) |> ignore
 
-            let app = builder.Build()
-            app.UseWebSockets() |> ignore
+                // Conversation history persistence — file-based, grouped by session ID
+                let conversationsDir = Path.Combine(Database.dataDir, "conversations")
+                builder.Services.AddSingleton<IConversationStore>(fun _ ->
+                    FileConversationStore(conversationsDir) :> IConversationStore) |> ignore
 
-            app.MapPost("/api/sessions", Func<HttpContext, IGrainFactory, _>(fun ctx grainFactory -> task {
-                let! request = ctx.Request.ReadFromJsonAsync<SessionStartRequest>()
-                let userId = Environment.UserName
-                let sessionId = Guid.NewGuid().ToString("N").[..7]
-                let grainKey = sprintf "%s/%s" userId sessionId
+                let app = builder.Build()
+                app.UseWebSockets() |> ignore
 
-                let session = grainFactory.GetGrain<ISessionGrain>(grainKey)
-                let startOpts = SessionStartOptions()
-                startOpts.AgentName <- request.AgentName
-                startOpts.WorkspaceKey <- request.WorkspaceKey
-                startOpts.ToolNames <- ResizeArray(request.ToolNames)
+                app.MapPost("/api/sessions", Func<HttpContext, IGrainFactory, _>(fun ctx grainFactory -> task {
+                    let! request = ctx.Request.ReadFromJsonAsync<SessionStartRequest>()
+                    let userId = Environment.UserName
+                    let sessionId = Guid.NewGuid().ToString("N").[..7]
+                    let grainKey = sprintf "%s/%s" userId sessionId
 
-                let! started = session.StartAsync(startOpts)
-                if started then
-                    return Results.Ok({| sessionId = grainKey |})
-                else
-                    return Results.BadRequest({| error = "Failed to start session" |})
-            })) |> ignore
+                    let session = grainFactory.GetGrain<ISessionGrain>(grainKey)
+                    let startOpts = SessionStartOptions()
+                    startOpts.AgentName <- request.AgentName
+                    startOpts.WorkspaceKey <- request.WorkspaceKey
+                    startOpts.ToolNames <- ResizeArray(request.ToolNames)
 
-            app.Map("/ws/sessions/{**id}", Func<HttpContext, IGrainFactory, string, _>(fun ctx grainFactory id -> task {
-                if ctx.WebSockets.IsWebSocketRequest then
-                    do! handleWebSocket ctx grainFactory id
-                    return Results.Empty
-                else
-                    return Results.BadRequest({| error = "WebSocket connection required" |})
-            })) |> ignore
+                    let! started = session.StartAsync(startOpts)
+                    if started then
+                        // Register in session directory for discoverability after restart
+                        let directory = grainFactory.GetGrain<ISessionDirectoryGrain>(userId)
+                        let entry = SessionDirectoryEntry()
+                        entry.SessionId <- grainKey
+                        entry.AgentName <- request.AgentName
+                        entry.Title <- sprintf "%s session" request.AgentName
+                        entry.CreatedAt <- DateTimeOffset.UtcNow
+                        entry.LastActiveAt <- DateTimeOffset.UtcNow
+                        entry.IsActive <- true
+                        do! directory.RegisterAsync(entry)
+                        return Results.Ok({| sessionId = grainKey |})
+                    else
+                        return Results.BadRequest({| error = "Failed to start session" |})
+                })) |> ignore
 
-            host <- Some app
-            tcs.SetResult()
-            app.Run(baseUrl)
+                app.MapGet("/api/sessions", Func<IGrainFactory, _>(fun grainFactory -> task {
+                    let userId = Environment.UserName
+                    let directory = grainFactory.GetGrain<ISessionDirectoryGrain>(userId)
+                    let! entries = directory.ListAllAsync()
+                    let dtos =
+                        entries
+                        |> Array.map (fun e ->
+                            {| sessionId = e.SessionId
+                               agentName = e.AgentName
+                               title = e.Title
+                               createdAt = e.CreatedAt
+                               lastActiveAt = e.LastActiveAt
+                               isActive = e.IsActive |})
+                    return Results.Ok(dtos)
+                })) |> ignore
+
+                app.MapGet("/api/sessions/history/{**id}", Func<IGrainFactory, string, _>(fun grainFactory id -> task {
+                    let session = grainFactory.GetGrain<ISessionGrain>(id)
+                    let! history = session.GetHistoryAsync()
+                    let dtos =
+                        history
+                        |> Array.map (fun m ->
+                            { MessageDto.Role = m.Role.ToLowerInvariant()
+                              Content = m.Content })
+                    return Results.Ok(dtos)
+                })) |> ignore
+
+                app.Map("/ws/sessions/{**id}", Func<HttpContext, IGrainFactory, string, _>(fun ctx grainFactory id -> task {
+                    if ctx.WebSockets.IsWebSocketRequest then
+                        do! handleWebSocket ctx grainFactory id
+                        return Results.Empty
+                    else
+                        return Results.BadRequest({| error = "WebSocket connection required" |})
+                })) |> ignore
+
+                host <- Some app
+                app.StartAsync(cancellation.Token).GetAwaiter().GetResult()
+                tcs.TrySetResult() |> ignore
+
+                // Block this background thread until shutdown is requested.
+                app.WaitForShutdownAsync(cancellation.Token).GetAwaiter().GetResult()
+            with ex ->
+                tcs.TrySetException(ex) |> ignore
         ), cancellation.Token, TaskCreationOptions.LongRunning, TaskScheduler.Default) |> ignore
 
-        // Wait for the server to be configured (not necessarily listening yet)
-        tcs.Task.Wait(TimeSpan.FromSeconds(10.0)) |> ignore
-        // Give a moment for the host to start listening
-        Thread.Sleep(2000)
+        // Wait for host startup completion and verify the listener is reachable.
+        let startupCompleted = tcs.Task.Wait(TimeSpan.FromSeconds(20.0))
+        if not startupCompleted then
+            failwith "Embedded server startup timed out after 20 seconds"
+
+        waitForListener port (TimeSpan.FromSeconds(8.0))
         baseUrl
 
     /// Gracefully stop the embedded server.
@@ -475,3 +579,23 @@ module EmbeddedServer =
         
         // Force exit the process to avoid Orleans silo lingering
         Environment.Exit(0)
+
+    /// Restart the server with new settings (e.g. after provider/model change).
+    let restart (settings: AppSettings) =
+        // Stop existing server (without Environment.Exit)
+        match cts with
+        | Some c ->
+            c.Cancel()
+            c.Dispose()
+            cts <- None
+        | None -> ()
+
+        match host with
+        | Some app ->
+            try app.StopAsync(TimeSpan.FromMilliseconds(500.0)).Wait(1000) |> ignore
+            with _ -> ()
+            host <- None
+        | None -> ()
+
+        // Start fresh
+        start settings |> ignore

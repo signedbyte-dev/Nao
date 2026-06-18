@@ -11,6 +11,7 @@ open System.Threading
 open System.Threading.Tasks
 
 /// Event raised when the server pushes a message.
+[<RequireQualifiedAccess>]
 type NaoEvent =
     | Chunk of text: string
     | Done of fullResponse: string
@@ -59,19 +60,19 @@ type NaoClient(baseUrl: string) =
         try
             let resp = JsonSerializer.Deserialize<WsResponse>(json, jsonOptions)
             match resp.Type with
-            | WsResponseType.Chunk -> Some (Chunk resp.Payload)
-            | WsResponseType.Done -> Some (Done resp.Payload)
+            | WsResponseType.Chunk -> Some (NaoEvent.Chunk resp.Payload)
+            | WsResponseType.Done -> Some (NaoEvent.Done resp.Payload)
             | WsResponseType.Info ->
                 let info = JsonSerializer.Deserialize<SessionInfoDto>(resp.Payload, jsonOptions)
-                Some (Info info)
+                Some (NaoEvent.Info info)
             | WsResponseType.History ->
                 let msgs = JsonSerializer.Deserialize<MessageDto[]>(resp.Payload, jsonOptions)
-                Some (History (Array.toList msgs))
+                Some (NaoEvent.History (Array.toList msgs))
             | WsResponseType.Conversations ->
                 let convs = JsonSerializer.Deserialize<string[]>(resp.Payload, jsonOptions)
-                Some (Conversations (Array.toList convs))
-            | WsResponseType.Error -> Some (Error resp.Payload)
-            | WsResponseType.Event -> Some (ServerEvent resp.Payload)
+                Some (NaoEvent.Conversations (Array.toList convs))
+            | WsResponseType.Error -> Some (NaoEvent.Error resp.Payload)
+            | WsResponseType.Event -> Some (NaoEvent.ServerEvent resp.Payload)
             | _ -> None
         with _ -> None
 
@@ -116,6 +117,22 @@ type NaoClient(baseUrl: string) =
         return result.sessionId
     }
 
+    /// List all existing sessions via HTTP.
+    member _.ListSessionsAsync() : Task<SessionListEntry list> = task {
+        let! resp = http.GetAsync("/api/sessions")
+        do! ensureSuccess resp
+        let! entries = resp.Content.ReadFromJsonAsync<SessionListEntry[]>(jsonOptions)
+        return entries |> Array.toList
+    }
+
+    /// Load full conversation history for a session via HTTP.
+    member _.LoadSessionHistoryAsync(sessionId: string) : Task<MessageDto list> = task {
+        let! resp = http.GetAsync(sprintf "/api/sessions/history/%s" sessionId)
+        do! ensureSuccess resp
+        let! entries = resp.Content.ReadFromJsonAsync<MessageDto[]>(jsonOptions)
+        return entries |> Array.toList
+    }
+
     /// Connect WebSocket to a session for bidirectional communication.
     member _.ConnectAsync(sessionId: string) : Task = task {
         let socket = new ClientWebSocket()
@@ -157,8 +174,8 @@ type NaoClient(baseUrl: string) =
         let tcs = TaskCompletionSource<string>()
         let handler = Handler<NaoEvent>(fun _ evt ->
             match evt with
-            | Done response -> tcs.TrySetResult(response) |> ignore
-            | Error err -> tcs.TrySetException(Exception(err)) |> ignore
+            | NaoEvent.Done response -> tcs.TrySetResult(response) |> ignore
+            | NaoEvent.Error err -> tcs.TrySetException(Exception(err)) |> ignore
             | _ -> ())
 
         this.OnMessage.AddHandler handler

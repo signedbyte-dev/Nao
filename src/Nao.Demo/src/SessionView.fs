@@ -5,8 +5,11 @@ open System.Threading.Tasks
 open Avalonia.Controls
 open Avalonia.FuncUI
 open Avalonia.FuncUI.DSL
+open global.Avalonia.FuncUI.Elmish.ElmishHook
 open Avalonia.Layout
 open Avalonia.Media
+open Avalonia.Threading
+open global.Elmish
 open Nao.Demo
 
 /// A single chat session tab view
@@ -17,13 +20,25 @@ module SessionView =
           Content: string
           Timestamp: DateTime }
 
+    /// Lifecycle of the session's conversation history.
+    type HistoryStatus =
+        | NeedsLoad
+        | Loading
+        | Loaded
+
+    /// Whether the session is currently awaiting a chat response.
+    type ChatStatus =
+        | Idle
+        | Sending
+
     type SessionState =
         { Id: string
           ServerSessionId: string option
           Title: string
           Messages: Message list
           Input: string
-          IsProcessing: bool }
+          Chat: ChatStatus
+          History: HistoryStatus }
 
     let createNew () =
         { Id = Guid.NewGuid().ToString("N").[..7]
@@ -31,34 +46,128 @@ module SessionView =
           Title = "New Session"
           Messages = []
           Input = ""
-          IsProcessing = false }
+          Chat = Idle
+          History = Loaded }
 
-    let private ensureSession (client: NaoClient) (state: IWritable<SessionState>) = task {
-        match state.Current.ServerSessionId with
-        | Some id -> return id
-        | None ->
-            let! sessionId = client.CreateSessionAsync(SessionStartRequest.Default)
-            state.Set { state.Current with ServerSessionId = Some sessionId }
-            return sessionId
-    }
+    type Msg =
+        | TriggerHistoryLoad
+        | HistoryLoaded of Result<Message list, string>
+        | InputChanged of string
+        | SendPressed
+        | SendCompleted of Result<string * string, string>
 
-    let private sendMessage (client: NaoClient) (state: IWritable<SessionState>) (msg: string) =
-        Task.Run<unit>(Func<Task<unit>>(fun () -> task {
-            try
-                let! sessionId = ensureSession client state
-                let! response = client.ChatAsync(sessionId, msg)
-                let replyMsg = { Role = "Nao"; Content = response; Timestamp = DateTime.Now }
-                state.Set { state.Current with
-                                Messages = state.Current.Messages @ [ replyMsg ]
-                                IsProcessing = false }
-            with ex ->
-                let errorMsg = { Role = "System"; Content = sprintf "Error: %s" ex.Message; Timestamp = DateTime.Now }
-                state.Set { state.Current with
-                                Messages = state.Current.Messages @ [ errorMsg ]
-                                IsProcessing = false }
-        })) |> ignore
+    let private toUiMessage (m: MessageDto) : Message =
+        let role =
+            match (if isNull m.Role then "" else m.Role).ToLowerInvariant() with
+            | "user" -> "You"
+            | "assistant" -> "Nao"
+            | r -> r
+        { Role = role
+          Content = (if isNull m.Content then "" else m.Content)
+          Timestamp = DateTime.Now }
 
-    let view (client: NaoClient) (state: IWritable<SessionState>) =
+    let private cmdOfSub (sub: ('msg -> unit) -> unit) : Cmd<'msg> =
+        [ sub ]
+
+    let private loadHistoryCmd (client: NaoClient) (sessionId: string) : Cmd<Msg> =
+        cmdOfSub (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let! msgs = client.LoadSessionHistoryAsync(sessionId)
+                        Dispatcher.UIThread.Post(fun () ->
+                            dispatch (HistoryLoaded (Ok (msgs |> List.map toUiMessage))))
+                    with ex ->
+                        Dispatcher.UIThread.Post(fun () ->
+                            dispatch (HistoryLoaded (Error ex.Message)))
+                }
+                :> Task)
+            |> ignore)
+
+    let private sendCmd (client: NaoClient) (model: SessionState) (userText: string) : Cmd<Msg> =
+        cmdOfSub (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let! sessionId =
+                            task {
+                                match model.ServerSessionId with
+                                | Some id -> return id
+                                | None -> return! client.CreateSessionAsync(SessionStartRequest.Default)
+                            }
+
+                        let! response = client.ChatAsync(sessionId, userText)
+                        Dispatcher.UIThread.Post(fun () ->
+                            dispatch (SendCompleted (Ok (sessionId, response))))
+                    with ex ->
+                        Dispatcher.UIThread.Post(fun () ->
+                            dispatch (SendCompleted (Error ex.Message)))
+                }
+                :> Task)
+            |> ignore)
+
+    let update (client: NaoClient) (msg: Msg) (model: SessionState) : SessionState * Cmd<Msg> =
+        match msg with
+        | TriggerHistoryLoad ->
+            match model.ServerSessionId with
+            | Some sessionId when model.History = NeedsLoad ->
+                { model with History = Loading }, loadHistoryCmd client sessionId
+            | _ ->
+                model, Cmd.none
+
+        | HistoryLoaded (Ok restored) ->
+            { model with
+                Messages = restored
+                History = Loaded },
+            Cmd.none
+
+        | HistoryLoaded (Error err) ->
+            let loadError =
+                { Role = "System"
+                  Content = sprintf "Failed to load history: %s" err
+                  Timestamp = DateTime.Now }
+            { model with
+                Messages = model.Messages @ [ loadError ]
+                History = Loaded },
+            Cmd.none
+
+        | InputChanged text ->
+            { model with Input = text }, Cmd.none
+
+        | SendPressed ->
+            let canSend =
+                model.Chat = Idle
+                && model.History = Loaded
+                && not (String.IsNullOrWhiteSpace model.Input)
+
+            if not canSend then
+                model, Cmd.none
+            else
+                let text = model.Input
+                let userMsg = { Role = "You"; Content = text; Timestamp = DateTime.Now }
+                { model with
+                    Messages = model.Messages @ [ userMsg ]
+                    Input = ""
+                    Chat = Sending },
+                sendCmd client model text
+
+        | SendCompleted (Ok (sessionId, response)) ->
+            let replyMsg = { Role = "Nao"; Content = response; Timestamp = DateTime.Now }
+            { model with
+                ServerSessionId = Some sessionId
+                Messages = model.Messages @ [ replyMsg ]
+                Chat = Idle },
+            Cmd.none
+
+        | SendCompleted (Error err) ->
+            let errorMsg = { Role = "System"; Content = sprintf "Error: %s" err; Timestamp = DateTime.Now }
+            { model with Messages = model.Messages @ [ errorMsg ]; Chat = Idle }, Cmd.none
+
+    let view (dispatch: Msg -> unit) (model: SessionState) : Avalonia.FuncUI.Types.IView =
+        let canSend =
+            model.Chat = Idle
+            && model.History = Loaded
+
         DockPanel.create [
             DockPanel.lastChildFill true
             DockPanel.children [
@@ -77,29 +186,23 @@ module SessionView =
                                     Button.content "Send"
                                     Button.margin (8.0, 0.0, 0.0, 0.0)
                                     Button.verticalAlignment VerticalAlignment.Bottom
-                                    Button.isEnabled (not state.Current.IsProcessing)
+                                    Button.isEnabled canSend
                                     Button.onClick (fun _ ->
-                                        if not (String.IsNullOrWhiteSpace(state.Current.Input)) then
-                                            let msg = state.Current.Input
-                                            let userMsg = { Role = "You"; Content = msg; Timestamp = DateTime.Now }
-                                            state.Set { state.Current with
-                                                            Messages = state.Current.Messages @ [ userMsg ]
-                                                            Input = ""
-                                                            IsProcessing = true }
-                                            sendMessage client state msg)
+                                        dispatch SendPressed)
                                 ]
                                 TextBox.create [
-                                    TextBox.text state.Current.Input
+                                    TextBox.text model.Input
                                     TextBox.watermark "Type a message... (Enter to send)"
                                     TextBox.acceptsReturn false
                                     TextBox.minHeight 36.0
                                     TextBox.verticalAlignment VerticalAlignment.Bottom
+                                    TextBox.isEnabled canSend
                                     TextBox.onTextChanged (fun text ->
-                                        state.Set { state.Current with Input = text })
+                                        dispatch (InputChanged text))
                                 ]
                             ]
-                        ]
-                    )
+                              ]
+                          )
                 ]
 
                 // Messages area
@@ -111,7 +214,25 @@ module SessionView =
                             StackPanel.orientation Orientation.Vertical
                             StackPanel.spacing 8.0
                             StackPanel.children [
-                                if state.Current.Messages.IsEmpty then
+                                if model.History = Loading then
+                                    StackPanel.create [
+                                        StackPanel.horizontalAlignment HorizontalAlignment.Center
+                                        StackPanel.margin (0.0, 40.0, 0.0, 0.0)
+                                        StackPanel.spacing 10.0
+                                        StackPanel.children [
+                                            ProgressBar.create [
+                                                ProgressBar.width 220.0
+                                                ProgressBar.height 8.0
+                                                ProgressBar.isIndeterminate true
+                                            ]
+                                            TextBlock.create [
+                                                TextBlock.text "Loading conversation history..."
+                                                TextBlock.foreground (SolidColorBrush(Color.Parse("#A1A1AA")))
+                                                TextBlock.horizontalAlignment HorizontalAlignment.Center
+                                            ]
+                                        ]
+                                    ]
+                                elif model.Messages.IsEmpty then
                                     TextBlock.create [
                                         TextBlock.text "Start a conversation..."
                                         TextBlock.foreground (SolidColorBrush(Color.Parse("#71717A")))
@@ -120,7 +241,7 @@ module SessionView =
                                         TextBlock.margin (0.0, 40.0, 0.0, 0.0)
                                     ]
                                 else
-                                    for msg in state.Current.Messages do
+                                    for msg in model.Messages do
                                         Border.create [
                                             Border.padding (8.0, 6.0)
                                             Border.cornerRadius 6.0
@@ -156,3 +277,4 @@ module SessionView =
                 ]
             ]
         ]
+

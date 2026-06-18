@@ -72,13 +72,13 @@ type ISessionGrain =
     abstract member SwitchConversationAsync: conversationName: string -> Task
 
     /// List all conversation contexts in this session
-    abstract member ListConversationsAsync: unit -> Task<string list>
+    abstract member ListConversationsAsync: unit -> Task<string array>
 
     /// Get the session metadata
     abstract member GetInfoAsync: unit -> Task<SessionInfo>
 
     /// Get the current conversation history
-    abstract member GetHistoryAsync: unit -> Task<Message list>
+    abstract member GetHistoryAsync: unit -> Task<MessageRecord array>
 
     /// Clear the current conversation context
     abstract member ClearHistoryAsync: unit -> Task
@@ -87,7 +87,7 @@ type ISessionGrain =
     abstract member SaveMemoryAsync: key: string * value: string -> Task
 
     /// Recall memories by key prefix
-    abstract member RecallMemoryAsync: key: string -> Task<MemoryEntry list>
+    abstract member RecallMemoryAsync: key: string -> Task<MemoryEntry array>
 
     /// Clear all memories
     abstract member ClearMemoriesAsync: unit -> Task
@@ -119,7 +119,8 @@ type SessionGrain
         [<PersistentState("sessionState", "sessionStore")>] persistentState: IPersistentState<SessionGrainState>,
         registry: IWorkspaceRegistry,
         provider: ILlmProvider,
-        orchestratorFactory: IOrchestratorFactory
+        orchestratorFactory: IOrchestratorFactory,
+        conversationStore: IConversationStore
     ) =
     inherit Grain()
 
@@ -167,17 +168,52 @@ type SessionGrain
     let activeConversation () : ConversationContext =
         getOrCreateConversation persistentState.State.Info.ActiveConversation
 
+    let roleToString (role: Role) =
+        match role with System -> "System" | User -> "User" | Assistant -> "Assistant"
+
+    let stringToRole (s: string) =
+        match s with "System" -> System | "Assistant" -> Assistant | _ -> User
+
     let restoreConversation () : Conversation =
         let ctx = activeConversation ()
-        ctx.Messages
-        |> Seq.map GrainStateMapping.toMessage
-        |> Seq.toList
+        if ctx.Messages.Count > 0 then
+            ctx.Messages
+            |> Seq.map GrainStateMapping.toMessage
+            |> Seq.toList
+        else
+            // Fallback: load from external conversation store
+            let sessionId = persistentState.State.Info.SessionId
+            let convName = persistentState.State.Info.ActiveConversation
+            if not (String.IsNullOrEmpty sessionId) then
+                let grainKey = sprintf "%s/%s" persistentState.State.Info.UserId sessionId
+                let loaded = conversationStore.LoadAsync grainKey convName
+                loaded.Result
+                |> Array.map (fun m -> { Role = stringToRole m.Role; Content = m.Content })
+                |> Array.toList
+            else []
 
-    let persistConversation (conversation: Conversation) =
-        let ctx = activeConversation ()
-        ctx.Messages.Clear()
-        for msg in conversation do
-            ctx.Messages.Add(GrainStateMapping.fromMessage msg)
+    let persistConversationAsync (conversation: Conversation) : Task =
+        task {
+            let ctx = activeConversation ()
+            ctx.Messages.Clear()
+            for msg in conversation do
+                ctx.Messages.Add(GrainStateMapping.fromMessage msg)
+
+            // Also persist to external store
+            let sessionId = persistentState.State.Info.SessionId
+            let userId = persistentState.State.Info.UserId
+            let convName = persistentState.State.Info.ActiveConversation
+            if not (String.IsNullOrEmpty sessionId) then
+                let grainKey = sprintf "%s/%s" userId sessionId
+                let messages =
+                    conversation
+                    |> List.map (fun m ->
+                        { PersistedMessage.Role = roleToString m.Role
+                          Content = m.Content
+                          Timestamp = DateTimeOffset.UtcNow })
+                    |> List.toArray
+                do! conversationStore.SaveAsync grainKey convName messages
+        }
 
     // ─── Tool resolution ───
 
@@ -291,7 +327,7 @@ type SessionGrain
                                     { Role = Assistant; Content = response }
                                 ]
 
-                        persistConversation finalConversation
+                        do! persistConversationAsync finalConversation
                         persistentState.State.Info.LastActiveAt <- DateTimeOffset.UtcNow
                         do! persistentState.WriteStateAsync()
                         return response
@@ -341,22 +377,39 @@ type SessionGrain
                 do! persistentState.WriteStateAsync()
             }
 
-        member _.ListConversationsAsync() : Task<string list> =
+        member _.ListConversationsAsync() : Task<string array> =
             persistentState.State.Conversations
             |> Seq.map (fun c -> c.Name)
-            |> Seq.toList
+            |> Seq.toArray
             |> Task.FromResult
 
         member _.GetInfoAsync() : Task<SessionInfo> =
             Task.FromResult(persistentState.State.Info)
 
-        member _.GetHistoryAsync() : Task<Message list> =
-            restoreConversation () |> Task.FromResult
+        member _.GetHistoryAsync() : Task<MessageRecord array> =
+            let ctx = activeConversation ()
+            // Restore messages from persistent storage if they're not already loaded in memory
+            if ctx.Messages.Count = 0 then
+                let sessionId = persistentState.State.Info.SessionId
+                let userId = persistentState.State.Info.UserId
+                let convName = persistentState.State.Info.ActiveConversation
+                if not (String.IsNullOrEmpty sessionId) then
+                    let grainKey = sprintf "%s/%s" userId sessionId
+                    let loaded = conversationStore.LoadAsync grainKey convName
+                    for pm in loaded.Result do
+                        let record = MessageRecord()
+                        record.Role <- pm.Role
+                        record.Content <- pm.Content
+                        ctx.Messages.Add(record)
+            ctx.Messages |> Seq.toArray |> Task.FromResult
 
-        member _.ClearHistoryAsync() : Task =
+        member this.ClearHistoryAsync() : Task =
             task {
                 let ctx = activeConversation ()
                 ctx.Messages.Clear()
+                let grainKey = this.GetPrimaryKeyString()
+                let convName = persistentState.State.Info.ActiveConversation
+                do! conversationStore.DeleteConversationAsync grainKey convName
                 do! persistentState.WriteStateAsync()
             }
 
@@ -375,11 +428,11 @@ type SessionGrain
                 do! persistentState.WriteStateAsync()
             }
 
-        member _.RecallMemoryAsync(key: string) : Task<MemoryEntry list> =
+        member _.RecallMemoryAsync(key: string) : Task<MemoryEntry array> =
             persistentState.State.Memories
             |> Seq.filter (fun m -> m.Key.Contains(key, StringComparison.OrdinalIgnoreCase))
             |> Seq.map GrainStateMapping.toMemoryEntry
-            |> Seq.toList
+            |> Seq.toArray
             |> Task.FromResult
 
         member _.ClearMemoriesAsync() : Task =
@@ -403,6 +456,9 @@ type SessionGrain
 
         member this.DestroyAsync() : Task =
             task {
+                // Clean up external conversation store
+                let grainKey = this.GetPrimaryKeyString()
+                do! conversationStore.DeleteSessionAsync(grainKey)
                 do! persistentState.ClearStateAsync()
                 this.DeactivateOnIdle()
             }
