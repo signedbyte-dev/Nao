@@ -20,6 +20,7 @@ open Nao.Core
 open Nao.Agents
 open Nao.Loader
 open Nao.Providers
+open Nao.Persistence
 open Nao.Runtime.Orleans
 open Nao.Runtime.Orleans.Grains
 
@@ -162,7 +163,13 @@ module DemoTools =
 module Database =
 
     let dataDir =
-        let dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nao.Desktop")
+        // Default to a folder under the current working directory so the app's data
+        // (SQLite db, conversations, observability) lands in the repo and can be
+        // inspected. Override with NAO_DATA_DIR to point elsewhere.
+        let dir =
+            match Environment.GetEnvironmentVariable("NAO_DATA_DIR") with
+            | path when not (String.IsNullOrWhiteSpace path) -> path
+            | _ -> Path.Combine(Environment.CurrentDirectory, ".nao-data")
         Directory.CreateDirectory(dir) |> ignore
         dir
 
@@ -471,6 +478,13 @@ module EmbeddedServer =
                 let conversationsDir = Path.Combine(Database.dataDir, "conversations")
                 builder.Services.AddSingleton<IConversationStore>(fun _ ->
                     FileConversationStore(conversationsDir) :> IConversationStore) |> ignore
+
+                // Observability + governance services injected into the SessionGrain harness.
+                // File-backed here for the desktop demo; swap to PersistenceMode.Database
+                // (or .InMemory for tests) to change where metrics/traces/audit/journal go.
+                let observabilityDir = Path.Combine(Database.dataDir, "observability")
+                builder.Services.AddSingleton<IHarnessServices>(fun _ ->
+                    Persistence.harnessServices (PersistenceMode.File observabilityDir)) |> ignore
 
                 let app = builder.Build()
                 app.UseWebSockets() |> ignore

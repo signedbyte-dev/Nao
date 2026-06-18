@@ -5,6 +5,45 @@ open System.Diagnostics
 open System.Threading.Tasks
 open Nao.Core
 
+/// Pluggable observability + governance services that a host (Orleans silo, ASP.NET
+/// app, test fixture, ...) injects into the harness. Each capability is optional so a
+/// host can supply only what it needs; `None` means that capability is disabled.
+/// This is the seam that lets callers choose in-memory (testing) vs persistent
+/// (production) backends without the harness/runtime knowing the concrete type.
+type IHarnessServices =
+    abstract member Tracer: ITracer option
+    abstract member Metrics: IMetricsCollector option
+    abstract member ExecutionJournal: IExecutionJournal option
+    abstract member TraceStore: ITraceStore option
+    abstract member AuditLog: IAuditLog option
+
+/// Helpers for constructing IHarnessServices values.
+module HarnessServices =
+
+    /// Services with nothing configured — every capability disabled.
+    let none: IHarnessServices =
+        { new IHarnessServices with
+            member _.Tracer = None
+            member _.Metrics = None
+            member _.ExecutionJournal = None
+            member _.TraceStore = None
+            member _.AuditLog = None }
+
+    /// Build services from explicit optional components.
+    let create
+        (tracer: ITracer option)
+        (metrics: IMetricsCollector option)
+        (executionJournal: IExecutionJournal option)
+        (traceStore: ITraceStore option)
+        (auditLog: IAuditLog option)
+        : IHarnessServices =
+        { new IHarnessServices with
+            member _.Tracer = tracer
+            member _.Metrics = metrics
+            member _.ExecutionJournal = executionJournal
+            member _.TraceStore = traceStore
+            member _.AuditLog = auditLog }
+
 /// Complete ETCLOVG harness configuration wiring all seven layers together
 type EtclovgConfig =
     { /// E — Execution Environment: sandbox and resource limits
@@ -53,6 +92,16 @@ type EtclovgConfig =
 
     static member WithObservability (tracer: ITracer) (metrics: IMetricsCollector) =
         { EtclovgConfig.Default with Tracer = Some tracer; Metrics = Some metrics }
+
+    /// Overlay host-provided pluggable services onto this config. A service that is
+    /// `Some` overrides the current value; `None` leaves the existing value intact.
+    member this.WithServices(services: IHarnessServices) =
+        { this with
+            Tracer = services.Tracer |> Option.orElse this.Tracer
+            Metrics = services.Metrics |> Option.orElse this.Metrics
+            ExecutionJournal = services.ExecutionJournal |> Option.orElse this.ExecutionJournal
+            TraceStore = services.TraceStore |> Option.orElse this.TraceStore
+            AuditLog = services.AuditLog |> Option.orElse this.AuditLog }
 
 /// Result of an ETCLOVG harness execution
 type EtclovgResult =

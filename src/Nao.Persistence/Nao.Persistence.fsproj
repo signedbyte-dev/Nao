@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Unified provider-agnostic ADO.NET infrastructure -->
+    <Compile Include="src/Ado.fs" />
+    <!-- Shared serialization / DTO codecs -->
+    <Compile Include="src/Serialization.fs" />
+    <!-- Event-sourced persistence infrastructure -->
+    <Compile Include="src/EventStore.fs" />
+    <!-- Normalized interface implementations (ADO.NET + FileSystem) -->
+    <Compile Include="src/MemoryStore.fs" />
+    <Compile Include="src/ExecutionJournal.fs" />
+    <Compile Include="src/SemanticMemory.fs" />
+    <Compile Include="src/AuditLog.fs" />
+    <!-- Event-sourced implementations of the richer stores -->
+    <Compile Include="src/EpisodicMemory.fs" />
+    <Compile Include="src/GraphMemory.fs" />
+    <Compile Include="src/TieredMemory.fs" />
+    <Compile Include="src/WorkingMemory.fs" />
+    <Compile Include="src/ToolDiscovery.fs" />
+    <Compile Include="src/Observability.fs" />
+    <!-- Backend selection + host-injectable service bundle -->
+    <Compile Include="src/Registration.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Nao.Core\Nao.Core.fsproj" />
+    <ProjectReference Include="..\Nao.Agents\Nao.Agents.fsproj" />
+  </ItemGroup>
+
+  <Import Project="..\..\.paket\Paket.Restore.targets" />
+
+</Project>

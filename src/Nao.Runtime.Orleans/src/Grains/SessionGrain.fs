@@ -120,7 +120,8 @@ type SessionGrain
         registry: IWorkspaceRegistry,
         provider: ILlmProvider,
         orchestratorFactory: IOrchestratorFactory,
-        conversationStore: IConversationStore
+        conversationStore: IConversationStore,
+        harnessServices: IHarnessServices
     ) =
     inherit Grain()
 
@@ -137,10 +138,11 @@ type SessionGrain
                 Some (ToolProtocol.fromTools tools)
             else
                 None
-        { EtclovgConfig.Default with
-            Constitution = constitution
-            ToolProtocol = toolProtocol
-            Metrics = Some (InMemoryMetricsCollector() :> IMetricsCollector) }
+        let baseConfig =
+            { EtclovgConfig.Default with
+                Constitution = constitution
+                ToolProtocol = toolProtocol }
+        baseConfig.WithServices(harnessServices)
 
     // ─── Key parsing ───
 
