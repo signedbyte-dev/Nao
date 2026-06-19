@@ -108,6 +108,7 @@ module DefinitionBuilder =
             else ContentMeta.Of def.OutputContentType
         { Name = def.Name
           Description = def.Description
+          Version = def.Version
           Execute = fun input -> task {
             let! result = executeDefAsync def.Execution [input]
             return
@@ -117,7 +118,8 @@ module DefinitionBuilder =
           }
           OutputContentType = contentType
           Verify = verify
-          Revert = revert }
+          Revert = revert
+          Provenance = def.Provenance }
 
     /// Build an OrchestratorConfig from an AgentDef
     let buildOrchestratorConfig

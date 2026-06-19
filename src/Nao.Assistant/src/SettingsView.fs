@@ -1,4 +1,4 @@
-namespace Nao.Demo
+namespace Nao.Assistant
 
 open Avalonia.Controls
 open Avalonia.FuncUI

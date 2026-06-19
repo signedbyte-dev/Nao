@@ -7,6 +7,7 @@ open Orleans.Runtime
 open Nao.Core
 open Nao.Agents
 open Nao.Loader
+open Nao.Feedback
 open Nao.Runtime.Orleans
 
 // Allow the Orleans C# codegen project to access internal F# DU backing fields.
@@ -26,6 +27,10 @@ type SessionInfo() =
     [<Id(7u)>] member val IsActive: bool = true with get, set
     [<Id(8u)>] member val ToolNames: ResizeArray<string> = ResizeArray() with get, set
     [<Id(9u)>] member val ActiveConversation: string = "default" with get, set
+    /// Optional pinned agent version ("" = unversioned / latest).
+    [<Id(10u)>] member val AgentVersion: string = "" with get, set
+    /// Id of the most recently processed turn (used to attach feedback).
+    [<Id(11u)>] member val LastTurnId: string = "" with get, set
 
 /// A named conversation context within a session
 [<GenerateSerializer>]
@@ -49,6 +54,8 @@ type SessionStartOptions() =
     [<Id(1u)>] member val ToolNames: ResizeArray<string> = ResizeArray() with get, set
     [<Id(2u)>] member val WorkspaceKey: string = "default" with get, set
     [<Id(3u)>] member val GroupId: string = "" with get, set
+    /// Optional pinned agent version ("" = unversioned / latest).
+    [<Id(4u)>] member val AgentVersion: string = "" with get, set
 
 /// Orleans grain interface for a user session.
 /// Grain key format: "userId/sessionId"
@@ -61,6 +68,14 @@ type ISessionGrain =
 
     /// Process user input — grain resolves workspace, builds agent, runs ETCLOVG harness.
     abstract member ProcessAsync: input: string -> Task<string>
+
+    /// Id of the most recently processed turn (empty if none). Use to attach feedback.
+    abstract member GetLastTurnIdAsync: unit -> Task<string>
+
+    /// Submit feedback for the most recently processed turn. `sentiment` is
+    /// "positive" / "negative" / "neutral". Returns the rationales of any tool
+    /// adjustments that were proposed and stored.
+    abstract member SubmitFeedbackAsync: sentiment: string * comment: string -> Task<string array>
 
     /// Switch to a different workspace (re-validates agent exists in new workspace)
     abstract member SwitchWorkspaceAsync: workspaceKey: string -> Task<bool>
@@ -121,7 +136,8 @@ type SessionGrain
         provider: ILlmProvider,
         orchestratorFactory: IOrchestratorFactory,
         conversationStore: IConversationStore,
-        harnessServices: IHarnessServices
+        harnessServices: IHarnessServices,
+        feedback: FeedbackService
     ) =
     inherit Grain()
 
@@ -131,7 +147,7 @@ type SessionGrain
         let key = WorkspaceId.create persistentState.State.Info.WorkspaceKey
         registry.TryGet key
 
-    let buildHarnessConfig (workspace: WorkspaceDefinitions) (tools: Tool list) : EtclovgConfig =
+    let buildHarnessConfig (workspace: WorkspaceDefinitions) (tools: Tool list) (eventSink: IAgentEventSink) : EtclovgConfig =
         let constitution = DefinitionBuilder.buildMergedConstitution workspace.ConstitutionDefs
         let toolProtocol =
             if tools.Length > 0 then
@@ -141,7 +157,8 @@ type SessionGrain
         let baseConfig =
             { EtclovgConfig.Default with
                 Constitution = constitution
-                ToolProtocol = toolProtocol }
+                ToolProtocol = toolProtocol
+                EventSink = eventSink }
         baseConfig.WithServices(harnessServices)
 
     // ─── Key parsing ───
@@ -220,11 +237,13 @@ type SessionGrain
     // ─── Tool resolution ───
 
     let resolveTool (workspace: WorkspaceDefinitions) (name: string) : Tool option =
+        // Tool references may be version-qualified ("name@version").
+        let (n, ver) = VersionRef.parse name
         workspace.Tools
-        |> List.tryFind (fun t -> t.Name = name)
+        |> List.tryFind (fun t -> t.Name = n && VersionRef.matches ver t.Version)
         |> Option.orElseWith (fun () ->
             workspace.ToolDefs
-            |> List.tryFind (fun d -> d.Name = name)
+            |> List.tryFind (fun d -> d.Name = n && VersionRef.matches ver d.Version)
             |> Option.map DefinitionBuilder.buildTool)
 
     let resolveTools (workspace: WorkspaceDefinitions) (names: string list) : Tool list =
@@ -232,27 +251,46 @@ type SessionGrain
 
     // ─── Agent resolution ───
 
-    let findAgentDef (workspace: WorkspaceDefinitions) (name: string) : AgentDef option =
-        workspace.AgentDefs |> List.tryFind (fun d -> d.Name = name)
+    /// Convert a stored version string ("" = none) into an optional version.
+    let versionOpt (version: string) : string option =
+        if String.IsNullOrEmpty version then None else Some version
 
-    let findBuiltAgent (workspace: WorkspaceDefinitions) (name: string) : IAgent option =
-        workspace.Agents |> List.tryFind (fun a -> a.Id.Name = name)
+    let findAgentDef (workspace: WorkspaceDefinitions) (name: string) (version: string option) : AgentDef option =
+        workspace.AgentDefs
+        |> List.tryFind (fun d -> d.Name = name && VersionRef.matches version d.Version)
 
-    let agentExists (workspace: WorkspaceDefinitions) (name: string) : bool =
-        (findAgentDef workspace name).IsSome || (findBuiltAgent workspace name).IsSome
+    let findBuiltAgent (workspace: WorkspaceDefinitions) (name: string) (version: string option) : IAgent option =
+        // Pre-built agents are unversioned (None); only resolvable when no version is requested.
+        match version with
+        | Some _ -> None
+        | None -> workspace.Agents |> List.tryFind (fun a -> a.Id.Name = name)
 
-    let createAgent (workspace: WorkspaceDefinitions) (name: string) (tools: Tool list) : IAgent option =
-        match findAgentDef workspace name with
-        | Some def ->
-            let subAgents =
-                def.SubAgents
-                |> List.choose (fun subName ->
-                    match findAgentDef workspace subName with
-                    | Some subDef -> Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider [] [] subDef)
-                    | None -> findBuiltAgent workspace subName)
-            Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider tools subAgents def)
-        | None ->
-            findBuiltAgent workspace name
+    let agentExists (workspace: WorkspaceDefinitions) (name: string) (version: string option) : bool =
+        (findAgentDef workspace name version).IsSome || (findBuiltAgent workspace name version).IsSome
+
+    /// Build an agent, overlaying any active agent annotations onto the resolved
+    /// definitions (the agent and its sub-agents) before construction. Annotations are
+    /// runtime overlays — dropping them restores the legacy agent definition.
+    let createAgentAsync (workspace: WorkspaceDefinitions) (name: string) (version: string option) (tools: Tool list) : Task<IAgent option> =
+        task {
+            match findAgentDef workspace name version with
+            | Some def ->
+                let! def = feedback.ApplyAgentAnnotationsAsync def
+                let subAgents = ResizeArray<IAgent>()
+                for subName in def.SubAgents do
+                    let (subN, subVer) = VersionRef.parse subName
+                    match findAgentDef workspace subN subVer with
+                    | Some subDef ->
+                        let! subDef = feedback.ApplyAgentAnnotationsAsync subDef
+                        subAgents.Add(DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider [] [] subDef)
+                    | None ->
+                        match findBuiltAgent workspace subN subVer with
+                        | Some a -> subAgents.Add a
+                        | None -> ()
+                return Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider tools (List.ofSeq subAgents) def)
+            | None ->
+                return findBuiltAgent workspace name version
+        }
 
     // ─── Interface implementation ───
 
@@ -269,11 +307,18 @@ type SessionGrain
                 | None -> return false
                 | Some workspace ->
 
-                if not (agentExists workspace options.AgentName) then
+                // Agent version may be specified explicitly or inline as "name@version".
+                let (agentName, inlineVersion) = VersionRef.parse options.AgentName
+                let agentVersion =
+                    if String.IsNullOrEmpty options.AgentVersion then inlineVersion
+                    else Some options.AgentVersion
+
+                if not (agentExists workspace agentName agentVersion) then
                     return false
                 else
                     let info = persistentState.State.Info
-                    info.AgentName <- options.AgentName
+                    info.AgentName <- agentName
+                    info.AgentVersion <- (agentVersion |> Option.defaultValue "")
                     info.SessionId <- sessionId
                     info.UserId <- userId
                     info.GroupId <- options.GroupId
@@ -301,6 +346,27 @@ type SessionGrain
                     return "[Error] Session is paused. Call ResumeAsync first."
                 else
 
+                // Capture any implicit feedback the user expresses about the previous turn
+                // (e.g. "that's wrong", "perfect, thanks"). It is persisted as conversation-
+                // sourced feedback that feeds the cross-session suggestion pipeline, and noted
+                // in session memory so the agent stays aware of it within this conversation.
+                let priorTurnId = persistentState.State.Info.LastTurnId
+                if not (String.IsNullOrEmpty priorTurnId) then
+                    let info = persistentState.State.Info
+                    match! feedback.CaptureImplicitFeedbackAsync(priorTurnId, info.SessionId, info.UserId, input) with
+                    | Some fb ->
+                        let note =
+                            sprintf "%A feedback on turn %s: %s"
+                                fb.Sentiment priorTurnId (fb.Comment |> Option.defaultValue "")
+                        let record = MemoryRecord()
+                        record.Key <- sprintf "feedback:%s" priorTurnId
+                        record.Value <- note
+                        record.Timestamp <- DateTimeOffset.UtcNow
+                        match persistentState.State.Memories |> Seq.tryFindIndex (fun m -> m.Key = record.Key) with
+                        | Some idx -> persistentState.State.Memories.[idx] <- record
+                        | None -> persistentState.State.Memories.Add(record)
+                    | None -> ()
+
                 match getWorkspace () with
                 | None ->
                     return sprintf "[Error] Workspace '%s' not available" persistentState.State.Info.WorkspaceKey
@@ -308,11 +374,23 @@ type SessionGrain
 
                 let tools = resolveTools workspace (persistentState.State.Info.ToolNames |> Seq.toList)
 
-                match createAgent workspace agentName tools with
+                // Overlay any active feedback annotations so user-improved tool behaviour
+                // takes effect transparently at load time (dropping them reverts to legacy).
+                let! tools = feedback.ApplyToolAnnotationsAsync tools
+
+                let agentVersion = versionOpt persistentState.State.Info.AgentVersion
+                let! agentOpt = createAgentAsync workspace agentName agentVersion tools
+                match agentOpt with
                 | None ->
                     return sprintf "[Error] Agent '%s' not found in workspace '%s'" agentName persistentState.State.Info.WorkspaceKey
                 | Some agent ->
-                    let harnessConfig = buildHarnessConfig workspace tools
+                    let info = persistentState.State.Info
+                    let turnId = Guid.NewGuid().ToString("N")
+                    let recorder =
+                        TurnRecorder.forTools tools
+                            (turnId, info.SessionId, info.UserId, info.WorkspaceKey,
+                             agentName, agentVersion, input)
+                    let harnessConfig = buildHarnessConfig workspace tools (recorder :> IAgentEventSink)
                     let! result = EtclovgHarness.runAsync harnessConfig agent input
 
                     match result.Success, result.Response with
@@ -330,6 +408,12 @@ type SessionGrain
                                 ]
 
                         do! persistConversationAsync finalConversation
+
+                        // Record the turn so feedback can later be analysed against it.
+                        let turnRecord = { recorder.Snapshot() with Output = response }
+                        do! feedback.RecordTurnAsync turnRecord
+                        info.LastTurnId <- turnId
+
                         persistentState.State.Info.LastActiveAt <- DateTimeOffset.UtcNow
                         do! persistentState.WriteStateAsync()
                         return response
@@ -342,13 +426,41 @@ type SessionGrain
                         return errorMsg
             }
 
+        member _.GetLastTurnIdAsync() : Task<string> =
+            Task.FromResult(persistentState.State.Info.LastTurnId)
+
+        member _.SubmitFeedbackAsync(sentiment: string, comment: string) : Task<string array> =
+            task {
+                let info = persistentState.State.Info
+                if String.IsNullOrEmpty info.LastTurnId then
+                    return [||]
+                else
+                    let parsedSentiment =
+                        match (sentiment |> Option.ofObj |> Option.defaultValue "").Trim().ToLowerInvariant() with
+                        | "positive" | "up" | "good" -> FeedbackSentiment.Positive
+                        | "negative" | "down" | "bad" -> FeedbackSentiment.Negative
+                        | _ -> FeedbackSentiment.Neutral
+                    let fb =
+                        { Id = Guid.NewGuid()
+                          TurnId = info.LastTurnId
+                          SessionId = info.SessionId
+                          UserId = info.UserId
+                          Sentiment = parsedSentiment
+                          Comment = if String.IsNullOrWhiteSpace comment then None else Some comment
+                          CreatedAt = DateTimeOffset.UtcNow
+                          Metadata = Map.empty }
+                    let! proposals = feedback.SubmitFeedbackAsync fb
+                    return proposals |> List.map (fun p -> p.Rationale) |> List.toArray
+            }
+
         member _.SwitchWorkspaceAsync(workspaceKey: string) : Task<bool> =
             task {
                 match registry.TryGet (WorkspaceId.create workspaceKey) with
                 | None -> return false
                 | Some workspace ->
                     let agentName = persistentState.State.Info.AgentName
-                    if not (String.IsNullOrEmpty(agentName)) && not (agentExists workspace agentName) then
+                    let agentVersion = versionOpt persistentState.State.Info.AgentVersion
+                    if not (String.IsNullOrEmpty(agentName)) && not (agentExists workspace agentName agentVersion) then
                         return false
                     else
                         persistentState.State.Info.WorkspaceKey <- workspaceKey
@@ -362,10 +474,13 @@ type SessionGrain
                 match getWorkspace () with
                 | None -> return false
                 | Some workspace ->
-                    if not (agentExists workspace agentName) then
+                    // The target agent may be version-qualified ("name@version").
+                    let (targetName, targetVersion) = VersionRef.parse agentName
+                    if not (agentExists workspace targetName targetVersion) then
                         return false
                     else
-                        persistentState.State.Info.AgentName <- agentName
+                        persistentState.State.Info.AgentName <- targetName
+                        persistentState.State.Info.AgentVersion <- (targetVersion |> Option.defaultValue "")
                         persistentState.State.Info.LastActiveAt <- DateTimeOffset.UtcNow
                         do! persistentState.WriteStateAsync()
                         return true

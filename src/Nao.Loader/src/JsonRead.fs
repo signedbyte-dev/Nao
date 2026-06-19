@@ -115,6 +115,7 @@ module JsonRead =
         let promptElem = subObj elem "prompt" |> Option.defaultWith (fun () -> JsonDocument.Parse("{}").RootElement)
         let optionsElem = subObj elem "options" |> Option.defaultWith (fun () -> JsonDocument.Parse("{}").RootElement)
         { Name = str elem "name"
+          Version = strOpt elem "version"
           Description = str elem "description"
           Provider = str elem "provider"
           Model = str elem "model"
@@ -122,7 +123,8 @@ module JsonRead =
           Tools = strArray elem "tools"
           SubAgents = strArray elem "sub_agents"
           Options = completionOptions optionsElem
-          MaxRounds = intVal elem "max_rounds" 5 }
+          MaxRounds = intVal elem "max_rounds" 5
+          Provenance = None }
 
     let private toolExecution (elem: JsonElement) (prefix: string) : ToolExecutionDef option =
         let mode =
@@ -187,11 +189,13 @@ module JsonRead =
             toolExecution elem ""
             |> Option.defaultValue (ToolExecutionDef.Process (str elem "command", strArray elem "args"))
         { Name = str elem "name"
+          Version = strOpt elem "version"
           Description = str elem "description"
           Execution = execution
           OutputContentType = str elem "output_content_type"
           VerifyExecution = toolExecution elem "verify"
-          RevertExecution = toolExecution elem "revert" }
+          RevertExecution = toolExecution elem "revert"
+          Provenance = None }
 
     let evaluatorRef (elem: JsonElement) : EvaluatorRef =
         { Type = str elem "type"

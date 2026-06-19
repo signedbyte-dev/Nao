@@ -15,6 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Nao.Agents\Nao.Agents.fsproj" />
     <ProjectReference Include="..\Nao.Loader\Nao.Loader.fsproj" />
+    <ProjectReference Include="..\Nao.Feedback\Nao.Feedback.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

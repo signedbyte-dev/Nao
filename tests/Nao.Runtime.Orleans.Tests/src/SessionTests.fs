@@ -25,6 +25,7 @@ module TestWorkspace =
 
     let agentDef name =
         { Name = name
+          Version = None
           Description = sprintf "Test agent: %s" name
           Provider = "echo"
           Model = "test"
@@ -32,15 +33,18 @@ module TestWorkspace =
           Tools = []
           SubAgents = []
           Options = CompletionOptions.Default
-          MaxRounds = 1 }
+          MaxRounds = 1
+          Provenance = None }
 
     let toolDef name =
         { Name = name
+          Version = None
           Description = sprintf "Test tool: %s" name
           Execution = ToolExecutionDef.Process ("echo", ["test-output"])
           OutputContentType = ""
           VerifyExecution = None
-          RevertExecution = None }
+          RevertExecution = None
+          Provenance = None }
 
     let empty : WorkspaceDefinitions =
         { AgentDefs = []

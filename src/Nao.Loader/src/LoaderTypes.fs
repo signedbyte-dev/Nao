@@ -9,6 +9,8 @@ open Nao.Eval
 type AgentDef =
     { /// Unique name identifying this agent definition
       Name: string
+      /// Optional version identifier (e.g. "1.0"). None = unversioned; matches any requested version.
+      Version: string option
       /// Human-readable description of the agent's purpose
       Description: string
       /// LLM provider name (e.g. "ollama", "openai", "anthropic")
@@ -24,7 +26,9 @@ type AgentDef =
       /// LLM completion options (temperature, max tokens, etc.)
       Options: CompletionOptions
       /// Maximum orchestration rounds before forcing a response
-      MaxRounds: int }
+      MaxRounds: int
+      /// Where this agent definition came from (populated by the loading source).
+      Provenance: ToolProvenance option }
 
 /// How a tool executes (the mechanism for running the tool)
 type ToolExecutionDef =
@@ -40,6 +44,8 @@ type ToolExecutionDef =
 type ToolDef =
     { /// Unique name identifying this tool
       Name: string
+      /// Optional version identifier (e.g. "1.0"). None = unversioned; matches any requested version.
+      Version: string option
       /// Human-readable description shown to agents
       Description: string
       /// How this tool executes
@@ -49,7 +55,9 @@ type ToolDef =
       /// Optional execution definition for verifying output
       VerifyExecution: ToolExecutionDef option
       /// Optional execution definition for reverting changes
-      RevertExecution: ToolExecutionDef option }
+      RevertExecution: ToolExecutionDef option
+      /// Where this tool definition came from (populated by the loading source).
+      Provenance: ToolProvenance option }
 
 /// Reference to an evaluator used in an eval suite
 type EvaluatorRef =

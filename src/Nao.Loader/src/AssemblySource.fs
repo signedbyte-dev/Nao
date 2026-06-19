@@ -51,7 +51,9 @@ type AssemblySource(assemblyPath: string) =
             |> Array.filter (fun p -> p.PropertyType = typeof<Tool>)
             |> Array.choose (fun p ->
                 try
-                    p.GetValue(null) :?> Tool |> Some
+                    let tool = p.GetValue(null) :?> Tool
+                    let memberName = sprintf "%s.%s" t.FullName p.Name
+                    Some { tool with Provenance = Some (ToolProvenance.assembly assemblyPath memberName) }
                 with _ -> None))
         |> Array.toList
 

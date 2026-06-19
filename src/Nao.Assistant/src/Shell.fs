@@ -1,4 +1,4 @@
-namespace Nao.Demo
+namespace Nao.Assistant
 
 open System
 open System.Threading.Tasks
@@ -10,7 +10,7 @@ open Avalonia.Media
 open Avalonia.Input
 open Avalonia.Threading
 open global.Elmish
-open Nao.Demo
+open Nao.Assistant
 
 /// Main shell — browser-like tabbed interface
 module Shell =
@@ -60,7 +60,8 @@ module Shell =
                                       SessionView.Messages = []
                                       SessionView.Input = ""
                                       SessionView.Chat = SessionView.Idle
-                                      SessionView.History = SessionView.NeedsLoad } : SessionView.SessionState)
+                                      SessionView.History = SessionView.NeedsLoad
+                                      SessionView.Feedback = None } : SessionView.SessionState)
                             else
                                 [ SessionView.createNew () ]
 

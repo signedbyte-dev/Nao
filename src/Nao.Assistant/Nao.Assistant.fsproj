@@ -9,7 +9,7 @@
     <Compile Include="src/Contracts.fs" />
     <Compile Include="src/NaoClient.fs" />
     <Compile Include="src/AppSettings.fs" />
-    <Compile Include="src/DemoOrchestrator.fs" />
+    <Compile Include="src/AssistantOrchestrator.fs" />
     <Compile Include="src/EmbeddedServer.fs" />
     <Compile Include="src/SessionView.fs" />
     <Compile Include="src/SettingsView.fs" />
@@ -25,6 +25,7 @@
     <ProjectReference Include="..\Nao.Loader\Nao.Loader.fsproj" />
     <ProjectReference Include="..\Nao.Providers\Nao.Providers.fsproj" />
     <ProjectReference Include="..\Nao.Persistence\Nao.Persistence.fsproj" />
+    <ProjectReference Include="..\Nao.Feedback\Nao.Feedback.fsproj" />
     <ProjectReference Include="..\Nao.Runtime.Orleans\Nao.Runtime.Orleans.fsproj" />
     <ProjectReference Include="..\Nao.Runtime.Orleans.Codegen\Nao.Runtime.Orleans.Codegen.csproj" />
   </ItemGroup>

@@ -65,7 +65,7 @@ module ToolSchema =
           Examples = []
           IsSideEffectFree = false
           CostCategory = ToolCostCategory.Unknown
-          Version = None }
+          Version = tool.Version }
 
     let render (schema: ToolSchema) : string =
         let paramsStr =

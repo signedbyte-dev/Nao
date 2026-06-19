@@ -1,4 +1,4 @@
-namespace Nao.Demo
+namespace Nao.Assistant
 
 open System.Threading
 open System.Threading.Tasks
@@ -11,7 +11,7 @@ type ToolConfirmationRequest =
       Completion: TaskCompletionSource<bool> }
 
 /// Custom orchestrator that prompts the user for confirmation before tool execution.
-type DemoOrchestrator(config: OrchestratorConfig, onConfirmation: ToolConfirmationRequest -> unit) =
+type AssistantOrchestrator(config: OrchestratorConfig, onConfirmation: ToolConfirmationRequest -> unit) =
     inherit OrchestratorBase(config)
 
     override this.TryParseActionAsync(content: string) =
@@ -29,7 +29,7 @@ type DemoOrchestrator(config: OrchestratorConfig, onConfirmation: ToolConfirmati
             | other -> return other
         }
 
-/// Factory that creates DemoOrchestrator instances with user confirmation support.
-type DemoOrchestratorFactory(onConfirmation: ToolConfirmationRequest -> unit) =
+/// Factory that creates AssistantOrchestrator instances with user confirmation support.
+type AssistantOrchestratorFactory(onConfirmation: ToolConfirmationRequest -> unit) =
     interface IOrchestratorFactory with
-        member _.Create(config) = DemoOrchestrator(config, onConfirmation) :> IAgent
+        member _.Create(config) = AssistantOrchestrator(config, onConfirmation) :> IAgent

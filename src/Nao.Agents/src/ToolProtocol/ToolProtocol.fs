@@ -55,12 +55,16 @@ module ToolProtocol =
             member _.ListTools() = Task.FromResult schemas
 
             member _.GetTool(name) =
-                schemas |> List.tryFind (fun s -> s.Name = name) |> Task.FromResult
+                let (n, ver) = VersionRef.parse name
+                schemas
+                |> List.tryFind (fun s -> s.Name = n && VersionRef.matches ver s.Version)
+                |> Task.FromResult
 
             member _.InvokeAsync (name: string) (input: string) =
                 task {
                     let sw = Stopwatch.StartNew()
-                    match tools |> List.tryFind (fun t -> t.Name = name) with
+                    let (n, ver) = VersionRef.parse name
+                    match tools |> List.tryFind (fun t -> t.Name = n && VersionRef.matches ver t.Version) with
                     | Some tool ->
                         try
                             let! result = tool.Execute input
@@ -90,7 +94,8 @@ module ToolProtocol =
                 }
 
             member _.IsAvailable(name: string) =
-                tools |> List.exists (fun t -> t.Name = name) |> Task.FromResult }
+                let (n, ver) = VersionRef.parse name
+                tools |> List.exists (fun t -> t.Name = n && VersionRef.matches ver t.Version) |> Task.FromResult }
 
     /// Wrap a protocol with middleware
     let withMiddleware (middleware: IToolMiddleware) (protocol: IToolProtocol) : IToolProtocol =

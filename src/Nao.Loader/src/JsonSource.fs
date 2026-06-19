@@ -2,6 +2,7 @@ namespace Nao.Loader
 
 open System.IO
 open System.Text.Json
+open Nao.Agents
 
 /// Loads definitions from a directory of JSON files.
 ///
@@ -37,12 +38,36 @@ type JsonSource(rootDir: string) =
             |> Array.toList
         else []
 
+    /// Load tool definitions, stamping each with provenance pointing at its source file.
+    let loadToolDefs () : LoadResult<ToolDef> list =
+        let dir = Path.Combine(rootDir, "tools")
+        if Directory.Exists dir then
+            Directory.GetFiles(dir, "*.json")
+            |> Array.map (fun f ->
+                match parseFile f JsonRead.toolDef with
+                | Result.Ok def -> Result.Ok { def with Provenance = Some (ToolProvenance.json f) }
+                | other -> other)
+            |> Array.toList
+        else []
+
+    /// Load agent definitions, stamping each with provenance pointing at its source file.
+    let loadAgentDefs () : LoadResult<AgentDef> list =
+        let dir = Path.Combine(rootDir, "agents")
+        if Directory.Exists dir then
+            Directory.GetFiles(dir, "*.json")
+            |> Array.map (fun f ->
+                match parseFile f JsonRead.agentDef with
+                | Result.Ok def -> Result.Ok { def with Provenance = Some (ToolProvenance.json f) }
+                | other -> other)
+            |> Array.toList
+        else []
+
     interface IDefinitionSource with
         member _.Name = sprintf "json:%s" rootDir
 
         member _.Load() =
-            { Agents = loadFromDir "agents" JsonRead.agentDef
-              Tools = loadFromDir "tools" JsonRead.toolDef
+            { Agents = loadAgentDefs ()
+              Tools = loadToolDefs ()
               EvalSuites = loadFromDir "evals" JsonRead.evalSuiteDef
               Constitutions = loadFromDir "governance" JsonRead.constitutionDef
               BuiltAgents = []

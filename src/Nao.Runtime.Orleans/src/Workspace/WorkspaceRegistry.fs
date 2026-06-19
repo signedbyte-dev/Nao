@@ -10,6 +10,10 @@ module WorkspaceId =
     let create (key: string) = { Key = key }
     let defaultId = { Key = "default" }
 
+    /// Build a version-qualified workspace id of the form "key@version".
+    /// Lets two versions of the same logical workspace coexist as distinct entries.
+    let versioned (key: string) (version: string) = { Key = sprintf "%s@%s" key version }
+
 /// Registry that manages multiple workspaces within a single silo.
 /// Customers register workspaces at silo startup or dynamically at runtime.
 /// Grains resolve workspace definitions by key on each request.
@@ -82,4 +86,14 @@ module WorkspaceRegistry =
         for (key, path) in workspaces do
             let defs = WorkspaceLoader.loadWorkspace path
             reg.Register(WorkspaceId.create key, defs, sourcePath = path)
+        reg
+
+    /// Create a registry from multiple versioned workspace paths.
+    /// Each entry is (key, version, path); registered under the id "key@version"
+    /// so multiple versions of the same logical workspace coexist side by side.
+    let fromVersionedWorkspaces (workspaces: (string * string * string) list) : WorkspaceRegistry =
+        let reg = WorkspaceRegistry()
+        for (key, version, path) in workspaces do
+            let defs = WorkspaceLoader.loadWorkspace path
+            reg.Register(WorkspaceId.versioned key version, defs, sourcePath = path)
         reg

@@ -1,4 +1,4 @@
-namespace Nao.Demo
+namespace Nao.Assistant
 
 open System
 open System.Buffers
@@ -9,6 +9,7 @@ open System.Text
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
+open Nao.Feedback
 
 /// Event raised when the server pushes a message.
 [<RequireQualifiedAccess>]
@@ -45,6 +46,15 @@ type NaoClient(baseUrl: string) =
                 try (JsonSerializer.Deserialize<ErrorResponse>(body, jsonOptions)).Error
                 with _ -> body
             failwithf "API error (%d): %s" (int resp.StatusCode) error
+    }
+
+    // Treat 2xx as success, 404 as "not found" (false), anything else as an error.
+    let okOrNotFound (resp: HttpResponseMessage) = task {
+        if resp.IsSuccessStatusCode then return true
+        elif resp.StatusCode = System.Net.HttpStatusCode.NotFound then return false
+        else
+            do! ensureSuccess resp
+            return false
     }
 
     let sendWs (msg: WsRequest) = task {
@@ -131,6 +141,137 @@ type NaoClient(baseUrl: string) =
         do! ensureSuccess resp
         let! entries = resp.Content.ReadFromJsonAsync<MessageDto[]>(jsonOptions)
         return entries |> Array.toList
+    }
+
+    // ─── Feedback / suggestion enhancement loop (HTTP) ───
+
+    /// Submit feedback for the most recent turn of a session. Returns the
+    /// improvement proposals the server derived from the feedback (if any).
+    member _.SubmitFeedbackAsync(sessionId: string, sentiment: string, ?comment: string) : Task<string list> = task {
+        let request = { FeedbackRequest.Sentiment = sentiment; Comment = defaultArg comment null }
+        let! resp = http.PostAsJsonAsync(sprintf "/api/sessions/feedback/%s" sessionId, request, jsonOptions)
+        do! ensureSuccess resp
+        let! result = resp.Content.ReadFromJsonAsync<{| proposals: string[] |}>(jsonOptions)
+        return (if isNull (box result.proposals) then [] else Array.toList result.proposals)
+    }
+
+    /// List all runtime annotations (overlays on tools/agents).
+    member _.ListAnnotationsAsync() : Task<Annotation list> = task {
+        let! resp = http.GetAsync("/api/annotations")
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<Annotation list> body
+    }
+
+    /// Manually add an annotation. Returns the stored annotation.
+    member _.AddAnnotationAsync(request: AnnotationRequest) : Task<Annotation> = task {
+        let! resp = http.PostAsJsonAsync("/api/annotations", request, jsonOptions)
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<Annotation> body
+    }
+
+    /// Enable/disable an annotation. Returns true if it was found and updated.
+    member _.SetAnnotationStatusAsync(annotationId: Guid, status: string) : Task<bool> = task {
+        let request = { AnnotationStatusRequest.Status = status }
+        let! resp = http.PostAsJsonAsync(sprintf "/api/annotations/%O/status" annotationId, request, jsonOptions)
+        return! okOrNotFound resp
+    }
+
+    /// Permanently drop an annotation. Returns true if it was found and removed.
+    member _.DropAnnotationAsync(annotationId: Guid) : Task<bool> = task {
+        let! resp = http.DeleteAsync(sprintf "/api/annotations/%O" annotationId)
+        return! okOrNotFound resp
+    }
+
+    /// List all version records.
+    member _.ListVersionsAsync() : Task<VersionRecord list> = task {
+        let! resp = http.GetAsync("/api/versions")
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<VersionRecord list> body
+    }
+
+    /// Promote a target's annotations into a new Draft version.
+    member _.PromoteVersionAsync(request: PromoteVersionRequest) : Task<VersionRecord> = task {
+        let! resp = http.PostAsJsonAsync("/api/versions/promote", request, jsonOptions)
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<VersionRecord> body
+    }
+
+    /// Confirm a Draft version (optionally replacing the legacy version).
+    member _.ConfirmVersionAsync(versionId: Guid, ?replaceLegacy: bool) : Task<bool> = task {
+        let request = { ConfirmVersionRequest.ReplaceLegacy = defaultArg replaceLegacy false }
+        let! resp = http.PostAsJsonAsync(sprintf "/api/versions/%O/confirm" versionId, request, jsonOptions)
+        return! okOrNotFound resp
+    }
+
+    /// Deprecate a version.
+    member _.DeprecateVersionAsync(versionId: Guid) : Task<bool> = task {
+        let! resp = http.PostAsync(sprintf "/api/versions/%O/deprecate" versionId, null)
+        return! okOrNotFound resp
+    }
+
+    /// Register a user-supplied tool definition. Returns the written file path.
+    member _.RegisterToolAsync(request: RegisterDefinitionRequest) : Task<string> = task {
+        let! resp = http.PostAsJsonAsync("/api/register/tool", request, jsonOptions)
+        do! ensureSuccess resp
+        let! result = resp.Content.ReadFromJsonAsync<{| registered: bool; path: string |}>(jsonOptions)
+        return result.path
+    }
+
+    /// Register a user-supplied agent definition. Returns the written file path.
+    member _.RegisterAgentAsync(request: RegisterDefinitionRequest) : Task<string> = task {
+        let! resp = http.PostAsJsonAsync("/api/register/agent", request, jsonOptions)
+        do! ensureSuccess resp
+        let! result = resp.Content.ReadFromJsonAsync<{| registered: bool; path: string |}>(jsonOptions)
+        return result.path
+    }
+
+    /// List all cross-session improvement suggestions.
+    member _.ListSuggestionsAsync() : Task<Suggestion list> = task {
+        let! resp = http.GetAsync("/api/suggestions")
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<Suggestion list> body
+    }
+
+    /// "Enhance the system": aggregate all feedback into review-gated suggestions.
+    member _.GenerateSuggestionsAsync() : Task<Suggestion list> = task {
+        let! resp = http.PostAsync("/api/suggestions/generate", null)
+        do! ensureSuccess resp
+        let! body = resp.Content.ReadAsStringAsync()
+        return FeedbackJson.deserialize<Suggestion list> body
+    }
+
+    /// Confirm a suggestion (marks it ready to bake into a candidate / upgrade).
+    member _.ConfirmSuggestionAsync(suggestionId: Guid) : Task<bool> = task {
+        let! resp = http.PostAsync(sprintf "/api/suggestions/%O/confirm" suggestionId, null)
+        return! okOrNotFound resp
+    }
+
+    /// Reject a suggestion.
+    member _.RejectSuggestionAsync(suggestionId: Guid) : Task<bool> = task {
+        let! resp = http.PostAsync(sprintf "/api/suggestions/%O/reject" suggestionId, null)
+        return! okOrNotFound resp
+    }
+
+    /// Build a candidate workspace from all confirmed suggestions. Returns the
+    /// number of improvements baked in (the workspace key is always "candidate").
+    member _.BuildCandidateAsync() : Task<int> = task {
+        let! resp = http.PostAsync("/api/candidate/build", null)
+        do! ensureSuccess resp
+        let! result = resp.Content.ReadFromJsonAsync<{| workspaceKey: string; improvements: int |}>(jsonOptions)
+        return result.improvements
+    }
+
+    /// Permanently upgrade the live system from all confirmed suggestions.
+    member _.UpgradeCandidateAsync() : Task<UpgradeResultDto list> = task {
+        let! resp = http.PostAsync("/api/candidate/upgrade", null)
+        do! ensureSuccess resp
+        let! result = resp.Content.ReadFromJsonAsync<{| upgraded: int; results: UpgradeResultDto[] |}>(jsonOptions)
+        return (if isNull (box result.results) then [] else Array.toList result.results)
     }
 
     /// Connect WebSocket to a session for bidirectional communication.
