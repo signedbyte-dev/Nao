@@ -1,7 +1,7 @@
 {
-  "name": "demo-constitution",
+  "name": "nao-assistant-policy",
   "version": "1.0",
-  "description": "Safety and behavior rules for the demo assistant.",
+  "description": "Safety and behavior policy for the Nao Assistant application.",
   "rules": [
     {
       "id": "no-secrets",
@@ -23,6 +23,20 @@
       "category": "behavioral",
       "priority": 80,
       "hardConstraint": true
+    },
+    {
+      "id": "confirm-destructive",
+      "description": "Confirm with the user before deleting or overwriting existing files",
+      "category": "behavioral",
+      "priority": 70,
+      "hardConstraint": true
+    },
+    {
+      "id": "cite-sources",
+      "description": "When answering from fetched web content, include the source URL",
+      "category": "behavioral",
+      "priority": 50,
+      "hardConstraint": false
     },
     {
       "id": "concise-responses",

@@ -51,13 +51,16 @@ type AppSettings =
       [<JsonPropertyName("workspacePath")>]
       WorkspacePath: string
       [<JsonPropertyName("theme")>]
-      Theme: string }
+      Theme: string
+      [<JsonPropertyName("language")>]
+      Language: string }
 
     static member Default =
         { Provider = ProviderSettings.Default
           Orchestrator = OrchestratorSettings.Default
           WorkspacePath = ""
-          Theme = "Dark" }
+          Theme = "Dark"
+          Language = "en" }
 
 module AppSettingsStore =
 

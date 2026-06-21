@@ -31,6 +31,9 @@ type SessionInfo() =
     [<Id(10u)>] member val AgentVersion: string = "" with get, set
     /// Id of the most recently processed turn (used to attach feedback).
     [<Id(11u)>] member val LastTurnId: string = "" with get, set
+    /// Runtime policy for launching tools ("" = host default; "docker"/"docker:&lt;image&gt;"
+    /// to containerize; a runtime name like "deno" to force it for all tools).
+    [<Id(12u)>] member val RuntimeMode: string = "" with get, set
 
 /// A named conversation context within a session
 [<GenerateSerializer>]
@@ -56,6 +59,9 @@ type SessionStartOptions() =
     [<Id(3u)>] member val GroupId: string = "" with get, set
     /// Optional pinned agent version ("" = unversioned / latest).
     [<Id(4u)>] member val AgentVersion: string = "" with get, set
+    /// Runtime policy for launching tools ("" = host default; "docker"/"docker:&lt;image&gt;"
+    /// to containerize; a runtime name like "deno" to force it for all tools).
+    [<Id(5u)>] member val RuntimeMode: string = "" with get, set
 
 /// Orleans grain interface for a user session.
 /// Grain key format: "userId/sessionId"
@@ -69,8 +75,19 @@ type ISessionGrain =
     /// Process user input — grain resolves workspace, builds agent, runs ETCLOVG harness.
     abstract member ProcessAsync: input: string -> Task<string>
 
+    /// Process user input where the LLM prompt and the persisted/display text differ:
+    /// `llmInput` (with embedded attachment content) is what the agent sees, while only
+    /// `displayText` plus `attachmentNames` are stored in the transcript.
+    abstract member ProcessWithContextAsync: llmInput: string * displayText: string * attachmentNames: string[] -> Task<string>
+
     /// Id of the most recently processed turn (empty if none). Use to attach feedback.
     abstract member GetLastTurnIdAsync: unit -> Task<string>
+
+    /// Snapshot of the steps of the turn currently being processed, for live progress
+    /// UIs. Returns an empty array when no turn is running. Marked reentrant
+    /// (`AlwaysInterleave`) so it can be polled while a turn is still in flight.
+    [<Orleans.Concurrency.AlwaysInterleave>]
+    abstract member GetLiveStepsAsync: unit -> Task<TurnStepRecord[]>
 
     /// Submit feedback for the most recently processed turn. `sentiment` is
     /// "positive" / "negative" / "neutral". Returns the rationales of any tool
@@ -141,6 +158,11 @@ type SessionGrain
     ) =
     inherit Grain()
 
+    /// The recorder for the turn currently being processed (None when idle). Held so the
+    /// reentrant `GetLiveStepsAsync` can surface in-progress steps for live UIs. Reads go
+    /// through `recorder.Steps`, which is internally lock-protected.
+    let mutable currentRecorder : TurnRecorder option = None
+
     // ─── Workspace resolution ───
 
     let getWorkspace () : WorkspaceDefinitions option =
@@ -187,56 +209,48 @@ type SessionGrain
     let activeConversation () : ConversationContext =
         getOrCreateConversation persistentState.State.Info.ActiveConversation
 
-    let roleToString (role: Role) =
-        match role with System -> "System" | User -> "User" | Assistant -> "Assistant"
+    /// Map a recorded process step onto its serializable storage form.
+    let toStepRecord (s: TurnStep) : TurnStepRecord =
+        TurnStepRecord(Kind = s.Kind, Title = s.Title, Input = s.Input, Output = s.Output)
 
-    let stringToRole (s: string) =
-        match s with "System" -> System | "Assistant" -> Assistant | _ -> User
-
-    let restoreConversation () : Conversation =
-        let ctx = activeConversation ()
-        if ctx.Messages.Count > 0 then
-            ctx.Messages
-            |> Seq.map GrainStateMapping.toMessage
-            |> Seq.toList
-        else
-            // Fallback: load from external conversation store
-            let sessionId = persistentState.State.Info.SessionId
-            let convName = persistentState.State.Info.ActiveConversation
-            if not (String.IsNullOrEmpty sessionId) then
-                let grainKey = sprintf "%s/%s" persistentState.State.Info.UserId sessionId
-                let loaded = conversationStore.LoadAsync grainKey convName
-                loaded.Result
-                |> Array.map (fun m -> { Role = stringToRole m.Role; Content = m.Content })
-                |> Array.toList
-            else []
-
-    let persistConversationAsync (conversation: Conversation) : Task =
+    /// Append a completed turn — the user prompt plus a single assistant message that
+    /// carries the whole process (ordered tool/sub-agent steps) and the final answer —
+    /// to both in-memory grain state and the external append-only store.
+    ///
+    /// The orchestrator's internal LLM conversation (where tool results are themselves
+    /// `User` messages and intermediate action-JSON is an `Assistant` message) is an
+    /// implementation detail and is intentionally NOT persisted as the transcript.
+    let appendTurnAsync (userInput: string) (attachmentNames: string[]) (response: string) (turnId: string) (steps: TurnStep list) : Task =
         task {
             let ctx = activeConversation ()
-            ctx.Messages.Clear()
-            for msg in conversation do
-                ctx.Messages.Add(GrainStateMapping.fromMessage msg)
+            let stepRecords = steps |> List.map toStepRecord
 
-            // Also persist to external store
+            let userRecord = MessageRecord(Role = "User", Content = userInput, TurnId = turnId,
+                                           Attachments = ResizeArray(attachmentNames))
+            let assistantRecord =
+                MessageRecord(Role = "Assistant", Content = response, TurnId = turnId,
+                              Steps = ResizeArray(stepRecords))
+            ctx.Messages.Add userRecord
+            ctx.Messages.Add assistantRecord
+
             let sessionId = persistentState.State.Info.SessionId
             let userId = persistentState.State.Info.UserId
             let convName = persistentState.State.Info.ActiveConversation
             if not (String.IsNullOrEmpty sessionId) then
                 let grainKey = sprintf "%s/%s" userId sessionId
-                let messages =
-                    conversation
-                    |> List.map (fun m ->
-                        { PersistedMessage.Role = roleToString m.Role
-                          Content = m.Content
-                          Timestamp = DateTimeOffset.UtcNow })
-                    |> List.toArray
-                do! conversationStore.SaveAsync grainKey convName messages
+                let now = DateTimeOffset.UtcNow
+                let persisted =
+                    [| { PersistedMessage.Role = "User"; Content = userInput
+                         Timestamp = now; TurnId = turnId; Steps = [||]; Attachments = attachmentNames }
+                       { PersistedMessage.Role = "Assistant"; Content = response
+                         Timestamp = now; TurnId = turnId
+                         Steps = stepRecords |> List.toArray; Attachments = [||] } |]
+                do! conversationStore.AppendAsync grainKey convName persisted
         }
 
     // ─── Tool resolution ───
 
-    let resolveTool (workspace: WorkspaceDefinitions) (name: string) : Tool option =
+    let resolveTool (workspace: WorkspaceDefinitions) (policy: RuntimePolicy) (name: string) : Tool option =
         // Tool references may be version-qualified ("name@version").
         let (n, ver) = VersionRef.parse name
         workspace.Tools
@@ -244,10 +258,10 @@ type SessionGrain
         |> Option.orElseWith (fun () ->
             workspace.ToolDefs
             |> List.tryFind (fun d -> d.Name = n && VersionRef.matches ver d.Version)
-            |> Option.map DefinitionBuilder.buildTool)
+            |> Option.map (DefinitionBuilder.buildToolWith policy))
 
-    let resolveTools (workspace: WorkspaceDefinitions) (names: string list) : Tool list =
-        names |> List.choose (resolveTool workspace)
+    let resolveTools (workspace: WorkspaceDefinitions) (policy: RuntimePolicy) (names: string list) : Tool list =
+        names |> List.choose (resolveTool workspace policy)
 
     // ─── Agent resolution ───
 
@@ -271,7 +285,9 @@ type SessionGrain
     /// Build an agent, overlaying any active agent annotations onto the resolved
     /// definitions (the agent and its sub-agents) before construction. Annotations are
     /// runtime overlays — dropping them restores the legacy agent definition.
-    let createAgentAsync (workspace: WorkspaceDefinitions) (name: string) (version: string option) (tools: Tool list) : Task<IAgent option> =
+    /// `eventSink` receives the orchestrator's execution events (rounds, tool calls,
+    /// delegations) so the turn's whole process can be recorded.
+    let createAgentAsync (workspace: WorkspaceDefinitions) (name: string) (version: string option) (tools: Tool list) (eventSink: IAgentEventSink) : Task<IAgent option> =
         task {
             match findAgentDef workspace name version with
             | Some def ->
@@ -282,14 +298,105 @@ type SessionGrain
                     match findAgentDef workspace subN subVer with
                     | Some subDef ->
                         let! subDef = feedback.ApplyAgentAnnotationsAsync subDef
-                        subAgents.Add(DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider [] [] subDef)
+                        subAgents.Add(DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider [] [] eventSink subDef)
                     | None ->
                         match findBuiltAgent workspace subN subVer with
                         | Some a -> subAgents.Add a
                         | None -> ()
-                return Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider tools (List.ofSeq subAgents) def)
+                return Some (DefinitionBuilder.buildAgentWithFactory orchestratorFactory provider tools (List.ofSeq subAgents) eventSink def)
             | None ->
                 return findBuiltAgent workspace name version
+        }
+
+    /// Core turn processing. `llmInput` is the prompt the agent sees (may contain embedded
+    /// attachment content); `displayText` + `attachmentNames` are what gets persisted into
+    /// the rendered transcript so the file body is never stored or shown.
+    let processCoreAsync (llmInput: string) (displayText: string) (attachmentNames: string[]) : Task<string> =
+        task {
+            let agentName = persistentState.State.Info.AgentName
+            if String.IsNullOrEmpty(agentName) then
+                return "[Error] Session not started. Call StartAsync first."
+            elif not persistentState.State.Info.IsActive then
+                return "[Error] Session is paused. Call ResumeAsync first."
+            else
+
+            // Capture any implicit feedback the user expresses about the previous turn
+            // (e.g. "that's wrong", "perfect, thanks"). It is persisted as conversation-
+            // sourced feedback that feeds the cross-session suggestion pipeline, and noted
+            // in session memory so the agent stays aware of it within this conversation.
+            let priorTurnId = persistentState.State.Info.LastTurnId
+            if not (String.IsNullOrEmpty priorTurnId) then
+                let info = persistentState.State.Info
+                match! feedback.CaptureImplicitFeedbackAsync(priorTurnId, info.SessionId, info.UserId, displayText) with
+                | Some fb ->
+                    let note =
+                        sprintf "%A feedback on turn %s: %s"
+                            fb.Sentiment priorTurnId (fb.Comment |> Option.defaultValue "")
+                    let record = MemoryRecord()
+                    record.Key <- sprintf "feedback:%s" priorTurnId
+                    record.Value <- note
+                    record.Timestamp <- DateTimeOffset.UtcNow
+                    match persistentState.State.Memories |> Seq.tryFindIndex (fun m -> m.Key = record.Key) with
+                    | Some idx -> persistentState.State.Memories.[idx] <- record
+                    | None -> persistentState.State.Memories.Add(record)
+                | None -> ()
+
+            match getWorkspace () with
+            | None ->
+                return sprintf "[Error] Workspace '%s' not available" persistentState.State.Info.WorkspaceKey
+            | Some workspace ->
+
+            let tools = resolveTools workspace (RuntimePolicy.parse persistentState.State.Info.RuntimeMode) (persistentState.State.Info.ToolNames |> Seq.toList)
+
+            // Overlay any active feedback annotations so user-improved tool behaviour
+            // takes effect transparently at load time (dropping them reverts to legacy).
+            let! tools = feedback.ApplyToolAnnotationsAsync tools
+
+            let agentVersion = versionOpt persistentState.State.Info.AgentVersion
+            let info = persistentState.State.Info
+            let turnId = Guid.NewGuid().ToString("N")
+            // The recorder must exist before the agent is built so it can be wired as the
+            // orchestrator's event sink and capture the whole execution (rounds, tool
+            // calls, delegations) — not just the harness-level Completed event.
+            let recorder =
+                TurnRecorder.forTools tools
+                    (turnId, info.SessionId, info.UserId, info.WorkspaceKey,
+                     agentName, agentVersion, llmInput)
+            // Expose this turn's recorder so GetLiveStepsAsync can stream progress while
+            // the harness runs; always clear it once the turn finishes (success or not).
+            currentRecorder <- Some recorder
+            try
+                let! agentOpt = createAgentAsync workspace agentName agentVersion tools (recorder :> IAgentEventSink)
+                match agentOpt with
+                | None ->
+                    return sprintf "[Error] Agent '%s' not found in workspace '%s'" agentName persistentState.State.Info.WorkspaceKey
+                | Some agent ->
+                    let harnessConfig = buildHarnessConfig workspace tools (recorder :> IAgentEventSink)
+                    let! result = EtclovgHarness.runAsync harnessConfig agent llmInput
+
+                    match result.Success, result.Response with
+                    | true, Some response ->
+                        // Record the turn so feedback can later be analysed against it.
+                        let turnRecord = { recorder.Snapshot() with Output = response }
+                        do! feedback.RecordTurnAsync turnRecord
+
+                        // Persist a CLEAN, user-facing transcript: the display text (no embedded
+                        // attachment content) plus one assistant message carrying the process.
+                        do! appendTurnAsync displayText attachmentNames response turnId recorder.Steps
+                        info.LastTurnId <- turnId
+
+                        persistentState.State.Info.LastActiveAt <- DateTimeOffset.UtcNow
+                        do! persistentState.WriteStateAsync()
+                        return response
+
+                    | _ ->
+                        let errorMsg =
+                            match result.HarnessError with
+                            | Some err -> sprintf "[Blocked] %s" err.Message
+                            | None -> result.Error |> Option.defaultValue "[Error] Unknown harness failure"
+                        return errorMsg
+            finally
+                currentRecorder <- None
         }
 
     // ─── Interface implementation ───
@@ -325,6 +432,7 @@ type SessionGrain
                     info.WorkspaceKey <- workspaceKey
                     info.IsActive <- true
                     info.ToolNames <- ResizeArray(options.ToolNames)
+                    info.RuntimeMode <- options.RuntimeMode
                     info.ActiveConversation <- "default"
                     if info.CreatedAt = DateTimeOffset.MinValue then
                         info.CreatedAt <- DateTimeOffset.UtcNow
@@ -338,96 +446,19 @@ type SessionGrain
             }
 
         member _.ProcessAsync(input: string) : Task<string> =
-            task {
-                let agentName = persistentState.State.Info.AgentName
-                if String.IsNullOrEmpty(agentName) then
-                    return "[Error] Session not started. Call StartAsync first."
-                elif not persistentState.State.Info.IsActive then
-                    return "[Error] Session is paused. Call ResumeAsync first."
-                else
+            processCoreAsync input input [||]
 
-                // Capture any implicit feedback the user expresses about the previous turn
-                // (e.g. "that's wrong", "perfect, thanks"). It is persisted as conversation-
-                // sourced feedback that feeds the cross-session suggestion pipeline, and noted
-                // in session memory so the agent stays aware of it within this conversation.
-                let priorTurnId = persistentState.State.Info.LastTurnId
-                if not (String.IsNullOrEmpty priorTurnId) then
-                    let info = persistentState.State.Info
-                    match! feedback.CaptureImplicitFeedbackAsync(priorTurnId, info.SessionId, info.UserId, input) with
-                    | Some fb ->
-                        let note =
-                            sprintf "%A feedback on turn %s: %s"
-                                fb.Sentiment priorTurnId (fb.Comment |> Option.defaultValue "")
-                        let record = MemoryRecord()
-                        record.Key <- sprintf "feedback:%s" priorTurnId
-                        record.Value <- note
-                        record.Timestamp <- DateTimeOffset.UtcNow
-                        match persistentState.State.Memories |> Seq.tryFindIndex (fun m -> m.Key = record.Key) with
-                        | Some idx -> persistentState.State.Memories.[idx] <- record
-                        | None -> persistentState.State.Memories.Add(record)
-                    | None -> ()
-
-                match getWorkspace () with
-                | None ->
-                    return sprintf "[Error] Workspace '%s' not available" persistentState.State.Info.WorkspaceKey
-                | Some workspace ->
-
-                let tools = resolveTools workspace (persistentState.State.Info.ToolNames |> Seq.toList)
-
-                // Overlay any active feedback annotations so user-improved tool behaviour
-                // takes effect transparently at load time (dropping them reverts to legacy).
-                let! tools = feedback.ApplyToolAnnotationsAsync tools
-
-                let agentVersion = versionOpt persistentState.State.Info.AgentVersion
-                let! agentOpt = createAgentAsync workspace agentName agentVersion tools
-                match agentOpt with
-                | None ->
-                    return sprintf "[Error] Agent '%s' not found in workspace '%s'" agentName persistentState.State.Info.WorkspaceKey
-                | Some agent ->
-                    let info = persistentState.State.Info
-                    let turnId = Guid.NewGuid().ToString("N")
-                    let recorder =
-                        TurnRecorder.forTools tools
-                            (turnId, info.SessionId, info.UserId, info.WorkspaceKey,
-                             agentName, agentVersion, input)
-                    let harnessConfig = buildHarnessConfig workspace tools (recorder :> IAgentEventSink)
-                    let! result = EtclovgHarness.runAsync harnessConfig agent input
-
-                    match result.Success, result.Response with
-                    | true, Some response ->
-                        let updatedConversation = agent.State.Conversation
-                        let existingConversation = restoreConversation ()
-
-                        let finalConversation =
-                            if updatedConversation.Length > 0 then
-                                updatedConversation
-                            else
-                                existingConversation @ [
-                                    { Role = User; Content = input }
-                                    { Role = Assistant; Content = response }
-                                ]
-
-                        do! persistConversationAsync finalConversation
-
-                        // Record the turn so feedback can later be analysed against it.
-                        let turnRecord = { recorder.Snapshot() with Output = response }
-                        do! feedback.RecordTurnAsync turnRecord
-                        info.LastTurnId <- turnId
-
-                        persistentState.State.Info.LastActiveAt <- DateTimeOffset.UtcNow
-                        do! persistentState.WriteStateAsync()
-                        return response
-
-                    | _ ->
-                        let errorMsg =
-                            match result.HarnessError with
-                            | Some err -> sprintf "[Blocked] %s" err.Message
-                            | None -> result.Error |> Option.defaultValue "[Error] Unknown harness failure"
-                        return errorMsg
-            }
+        member _.ProcessWithContextAsync(llmInput: string, displayText: string, attachmentNames: string[]) : Task<string> =
+            processCoreAsync llmInput displayText (if isNull attachmentNames then [||] else attachmentNames)
 
         member _.GetLastTurnIdAsync() : Task<string> =
             Task.FromResult(persistentState.State.Info.LastTurnId)
+
+        member _.GetLiveStepsAsync() : Task<TurnStepRecord[]> =
+            match currentRecorder with
+            | Some recorder ->
+                Task.FromResult(recorder.Steps |> List.map toStepRecord |> List.toArray)
+            | None -> Task.FromResult([||])
 
         member _.SubmitFeedbackAsync(sentiment: string, comment: string) : Task<string array> =
             task {
@@ -517,6 +548,11 @@ type SessionGrain
                         let record = MessageRecord()
                         record.Role <- pm.Role
                         record.Content <- pm.Content
+                        record.TurnId <- (if isNull (box pm.TurnId) then "" else pm.TurnId)
+                        if not (isNull (box pm.Steps)) then
+                            record.Steps <- ResizeArray(pm.Steps)
+                        if not (isNull (box pm.Attachments)) then
+                            record.Attachments <- ResizeArray(pm.Attachments)
                         ctx.Messages.Add(record)
             ctx.Messages |> Seq.toArray |> Task.FromResult
 

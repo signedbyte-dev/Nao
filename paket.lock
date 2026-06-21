@@ -65,6 +65,8 @@ NUGET
     HarfBuzzSharp.NativeAssets.WebAssembly (8.3.1.5) - restriction: >= net8.0
     HarfBuzzSharp.NativeAssets.Win32 (8.3.1.5) - restriction: || (&& (>= net10.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0-windows10.0.19041.0)) (>= net10.0-windows10.0.19041.0) (&& (>= net462) (>= net8.0)) (&& (< net6.0) (>= net8.0)) (&& (>= net8.0) (< net9.0)) (&& (>= net8.0) (< netstandard2.1))
     Humanizer.Core (3.0.10) - restriction: >= net8.0
+    Irihi.Avalonia.Shared (0.4) - restriction: >= net8.0
+      Avalonia (>= 12.0) - restriction: >= net8.0
     MicroCom.Runtime (0.11.6) - restriction: >= net8.0
     Microsoft.AspNetCore.Connections.Abstractions (10.0.9) - restriction: >= net8.0
       Microsoft.Bcl.AsyncInterfaces (>= 10.0.9) - restriction: || (&& (< net10.0) (>= netstandard2.1)) (>= net462) (&& (>= netstandard2.0) (< netstandard2.1))
@@ -661,6 +663,9 @@ NUGET
       System.Memory.Data (>= 8.0.1) - restriction: && (< net10.0) (>= net8.0)
       System.Memory.Data (>= 10.0.3) - restriction: >= net10.0
     Newtonsoft.Json (13.0.4) - restriction: >= net8.0
+    Semi.Avalonia (12.0.3)
+      Avalonia (>= 12.0.3) - restriction: >= net8.0
+      Irihi.Avalonia.Shared (>= 0.4) - restriction: >= net8.0
     SkiaSharp (3.119.4) - restriction: >= net8.0
       SkiaSharp.NativeAssets.macOS (>= 3.119.4) - restriction: || (&& (>= net10.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0) (< net9.0-windows10.0.19041.0)) (>= net10.0-macos) (>= net462) (&& (>= net6.0) (< net9.0)) (&& (< net6.0) (>= netstandard2.1)) (>= net9.0-macos) (&& (>= netstandard2.0) (< netstandard2.1))
       SkiaSharp.NativeAssets.Win32 (>= 3.119.4) - restriction: || (&& (>= net10.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0) (< net9.0-windows10.0.19041.0)) (&& (< net10.0) (>= net9.0-windows10.0.19041.0)) (>= net10.0-windows10.0.19041.0) (>= net462) (&& (>= net6.0) (< net9.0)) (&& (< net6.0) (>= netstandard2.1)) (&& (>= netstandard2.0) (< netstandard2.1))

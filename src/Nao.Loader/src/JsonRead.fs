@@ -192,6 +192,7 @@ module JsonRead =
           Version = strOpt elem "version"
           Description = str elem "description"
           Execution = execution
+          Runtime = str elem "runtime"
           OutputContentType = str elem "output_content_type"
           VerifyExecution = toolExecution elem "verify"
           RevertExecution = toolExecution elem "revert"

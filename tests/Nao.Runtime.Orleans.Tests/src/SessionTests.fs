@@ -41,6 +41,7 @@ module TestWorkspace =
           Version = None
           Description = sprintf "Test tool: %s" name
           Execution = ToolExecutionDef.Process ("echo", ["test-output"])
+          Runtime = ""
           OutputContentType = ""
           VerifyExecution = None
           RevertExecution = None

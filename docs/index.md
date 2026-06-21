@@ -12,6 +12,7 @@ Nao is an F# framework for building, orchestrating, and evaluating LLM-powered a
 | [Nao.Loader](reference/nao-loader.html) | Workspace loader — JSON definitions, multi-mode execution (Process/HTTP/Custom), plugins |
 | [Nao.Eval](reference/nao-eval.html) | Agent evaluation framework — test cases, evaluators, LLM judge, regression |
 | [Nao.Runtime.Orleans](reference/nao-runtime-orleans.html) | Distributed runtime — multi-workspace registry, group directory, session grains |
+| Nao.Assistant | Avalonia.FuncUI desktop chat app — embedded ASP.NET Core + Orleans host, live execution-trace streaming, dark/light themes, localizable UI |
 
 ## Architecture
 

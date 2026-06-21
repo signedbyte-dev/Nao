@@ -39,6 +39,79 @@ type ToolExecutionDef =
     /// Use a named executor registered at runtime (for custom protocols: gRPC, MCP, etc.)
     | Custom of executor: string * config: Map<string, string>
 
+/// Describes a named runtime that a process-based tool needs in order to run.
+/// For example, a TypeScript entrypoint declares runtime "deno" so it launches as
+/// `deno run -A entry.ts <args>` instead of being executed directly.
+type ToolRuntime =
+    { /// Identifier used in tool/session config (e.g. "deno", "ts-node", "python").
+      Name: string
+      /// Launcher executable that wraps the tool command ("" = run the command directly).
+      Command: string
+      /// Leading arguments for the launcher (e.g. ["run"; "-A"] for deno).
+      Args: string list
+      /// Default container image used when this runtime is containerized.
+      DefaultImage: string option }
+
+/// Built-in runtimes plus resolution of runtime names to launcher commands.
+module ToolRuntime =
+
+    /// Run the command directly on the host (no wrapping).
+    let native = { Name = "native"; Command = ""; Args = []; DefaultImage = None }
+
+    let deno = { Name = "deno"; Command = "deno"; Args = ["run"; "-A"]; DefaultImage = Some "denoland/deno:latest" }
+    let tsNode = { Name = "ts-node"; Command = "ts-node"; Args = []; DefaultImage = Some "node:latest" }
+    let node = { Name = "node"; Command = "node"; Args = []; DefaultImage = Some "node:latest" }
+    let bun = { Name = "bun"; Command = "bun"; Args = ["run"]; DefaultImage = Some "oven/bun:latest" }
+    let python = { Name = "python"; Command = "python3"; Args = []; DefaultImage = Some "python:3" }
+    let bash = { Name = "bash"; Command = "bash"; Args = []; DefaultImage = Some "bash:latest" }
+
+    /// Known runtimes, keyed by name.
+    let builtins = [ native; deno; tsNode; node; bun; python; bash ]
+
+    let private byName =
+        builtins |> List.map (fun r -> r.Name.ToLowerInvariant(), r) |> Map.ofList
+
+    /// Resolve a runtime name to its definition. Unknown / empty names resolve to a
+    /// runtime that launches the given command directly (i.e. the name is treated as
+    /// the launcher executable itself), so arbitrary interpreters still work.
+    let resolve (name: string) : ToolRuntime =
+        if System.String.IsNullOrWhiteSpace name then native
+        else
+            let key = name.Trim().ToLowerInvariant()
+            match Map.tryFind key byName with
+            | Some r -> r
+            | None -> { Name = key; Command = name.Trim(); Args = []; DefaultImage = None }
+
+/// Session-level policy deciding how tool processes are launched, overlaying the
+/// runtime each tool declares for itself.
+type RuntimePolicy =
+    /// Each tool uses its own declared runtime, executed on the host.
+    | HostDefault
+    /// Force every tool to launch through the named runtime on the host (e.g. "deno").
+    | ForceRuntime of runtime: string
+    /// Run every tool inside a container. When `image` is None the tool runtime's
+    /// default image is used (falling back to a base image).
+    | Containerized of image: string option
+
+/// Parsing of the session runtime-mode string into a RuntimePolicy.
+module RuntimePolicy =
+
+    /// Parse a runtime-mode string:
+    ///  - "" / "native" / "host"  -> HostDefault
+    ///  - "docker" / "container"   -> Containerized None
+    ///  - "docker:<image>"         -> Containerized (Some image)
+    ///  - any other value          -> ForceRuntime value (e.g. "deno")
+    let parse (mode: string) : RuntimePolicy =
+        if System.String.IsNullOrWhiteSpace mode then HostDefault
+        else
+            let m = mode.Trim()
+            let lower = m.ToLowerInvariant()
+            if lower = "native" || lower = "host" then HostDefault
+            elif lower = "docker" || lower = "container" then Containerized None
+            elif lower.StartsWith "docker:" then Containerized (Some (m.Substring("docker:".Length)))
+            elif lower.StartsWith "container:" then Containerized (Some (m.Substring("container:".Length)))
+            else ForceRuntime m
+
 /// Parsed tool definition loaded from JSON configuration.
 /// Supports multiple execution strategies: process, HTTP, custom.
 type ToolDef =
@@ -50,6 +123,9 @@ type ToolDef =
       Description: string
       /// How this tool executes
       Execution: ToolExecutionDef
+      /// Runtime the tool's process needs (e.g. "deno", "ts-node", "python").
+      /// Empty = native (run the command directly). Ignored for HTTP/custom tools.
+      Runtime: string
       /// Content type of the tool's output (e.g. "text/plain", "application/json")
       OutputContentType: string
       /// Optional execution definition for verifying output

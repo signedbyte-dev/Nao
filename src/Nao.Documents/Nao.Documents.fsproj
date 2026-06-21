@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src/Geometry.fs" />
+    <Compile Include="src/Resources.fs" />
+    <Compile Include="src/Styling.fs" />
+    <Compile Include="src/Layout.fs" />
+    <Compile Include="src/Content.fs" />
+    <Compile Include="src/Document.fs" />
+    <Compile Include="src/Conversion.fs" />
+    <Compile Include="src/Registry.fs" />
+    <Compile Include="src/PlainText.fs" />
+    <Compile Include="src/Markdown.fs" />
+  </ItemGroup>
+
+</Project>

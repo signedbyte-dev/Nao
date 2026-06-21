@@ -44,6 +44,45 @@ module DefinitionBuilder =
             return (proc.ExitCode, output.TrimEnd())
         }
 
+    /// Compute the actual launcher command and leading arguments for a process tool,
+    /// applying the tool's declared runtime and the session runtime policy.
+    ///
+    /// The resolution order is:
+    ///   1. A session `ForceRuntime` overrides the tool's declared runtime.
+    ///   2. The (effective) runtime wraps the raw command, e.g.
+    ///      deno -> `deno run -A <cmd>`; native -> `<cmd>` unchanged.
+    ///   3. A `Containerized` policy wraps the whole thing in
+    ///      `docker run --rm -v <pwd>:/work -w /work <image> <pieces...>`.
+    ///
+    /// Returns (launcherExecutable, leadingArgs) — the tool's own fixed args and the
+    /// per-call input are appended to leadingArgs by the caller.
+    let resolveProcessLauncher (policy: RuntimePolicy) (toolRuntime: string) (cmd: string) : string * string list =
+        // Session ForceRuntime overrides the tool's own declared runtime.
+        let runtimeName =
+            match policy with
+            | ForceRuntime r -> r
+            | _ -> toolRuntime
+        let runtime = ToolRuntime.resolve runtimeName
+        // Host pieces: [launcher; launcherArgs...; cmd]  (or just [cmd] when native).
+        let hostPieces =
+            if String.IsNullOrWhiteSpace runtime.Command then [ cmd ]
+            else runtime.Command :: (runtime.Args @ [ cmd ])
+        match policy with
+        | Containerized imageOpt ->
+            let image =
+                imageOpt
+                |> Option.orElse runtime.DefaultImage
+                |> Option.defaultValue "alpine:latest"
+            // Mount the working directory so script paths remain accessible inside the
+            // container, and run there.
+            let dockerArgs =
+                [ "run"; "--rm"; "-v"; "${PWD}:/work"; "-w"; "/work"; image ] @ hostPieces
+            ("docker", dockerArgs)
+        | _ ->
+            match hostPieces with
+            | head :: tail -> (head, tail)
+            | [] -> (cmd, [])
+
     /// Execute an HTTP call and return the response body
     let private runHttp (url: string) (httpMethod: string) (headers: Map<string, string>) (input: string) : Task<Result<string, string>> =
         task {
@@ -63,12 +102,14 @@ module DefinitionBuilder =
                 return Error (sprintf "HTTP %d: %s" (int response.StatusCode) body)
         }
 
-    /// Execute a ToolExecutionDef with the given arguments
-    let private executeDefAsync (exec: ToolExecutionDef) (args: string list) : Task<Result<string, string>> =
+    /// Execute a ToolExecutionDef with the given arguments, honouring the runtime
+    /// policy and the tool's declared runtime for process executions.
+    let private executeDefAsync (policy: RuntimePolicy) (toolRuntime: string) (exec: ToolExecutionDef) (args: string list) : Task<Result<string, string>> =
         task {
             match exec with
             | ToolExecutionDef.Process (cmd, fixedArgs) ->
-                let! (exitCode, output) = runProcess cmd (fixedArgs @ args)
+                let (launcher, leadingArgs) = resolveProcessLauncher policy toolRuntime cmd
+                let! (exitCode, output) = runProcess launcher (leadingArgs @ fixedArgs @ args)
                 if exitCode = 0 then return Ok output
                 else return Error (sprintf "Process exited with code %d: %s" exitCode output)
             | ToolExecutionDef.Http (url, httpMethod, headers) ->
@@ -83,15 +124,15 @@ module DefinitionBuilder =
                     return Error (sprintf "Custom executor '%s' not registered" executorName)
         }
 
-    /// Build a Tool from a ToolDef
-    let buildTool (def: ToolDef) : Tool =
+    /// Build a Tool from a ToolDef, applying the given session runtime policy.
+    let buildToolWith (policy: RuntimePolicy) (def: ToolDef) : Tool =
         let verify =
             match def.VerifyExecution with
             | None -> None
             | Some verifyExec ->
                 Some (fun (input: string) (output: string) ->
                     task {
-                        let! result = executeDefAsync verifyExec [input; output]
+                        let! result = executeDefAsync policy def.Runtime verifyExec [input; output]
                         return result |> Result.map ignore
                     })
         let revert =
@@ -100,7 +141,7 @@ module DefinitionBuilder =
             | Some revertExec ->
                 Some (fun (ctx: RevertContext) ->
                     task {
-                        let! result = executeDefAsync revertExec [ctx.Input; ctx.Output]
+                        let! result = executeDefAsync policy def.Runtime revertExec [ctx.Input; ctx.Output]
                         return result |> Result.map ignore
                     })
         let contentType =
@@ -110,7 +151,7 @@ module DefinitionBuilder =
           Description = def.Description
           Version = def.Version
           Execute = fun input -> task {
-            let! result = executeDefAsync def.Execution [input]
+            let! result = executeDefAsync policy def.Runtime def.Execution [input]
             return
                 match result with
                 | Ok output -> output
@@ -120,6 +161,11 @@ module DefinitionBuilder =
           Verify = verify
           Revert = revert
           Provenance = def.Provenance }
+
+    /// Build a Tool from a ToolDef using the host-default runtime policy
+    /// (each tool uses its own declared runtime, executed on the host).
+    let buildTool (def: ToolDef) : Tool =
+        buildToolWith RuntimePolicy.HostDefault def
 
     /// Build an OrchestratorConfig from an AgentDef
     let buildOrchestratorConfig
@@ -154,9 +200,10 @@ module DefinitionBuilder =
         (provider: ILlmProvider)
         (tools: Tool list)
         (subAgents: IAgent list)
+        (eventSink: IAgentEventSink)
         (def: AgentDef)
         : IAgent =
-        let config = buildOrchestratorConfig provider tools subAgents def
+        let config = { buildOrchestratorConfig provider tools subAgents def with EventSink = eventSink }
         factory.Create config
 
     /// Build an EvalDataset from an EvalSuiteDef

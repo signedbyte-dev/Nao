@@ -40,6 +40,7 @@ The framework implements the **ETCLOVG** taxonomy from "Agent Harness Engineerin
 - **Workspace Loader** — JSON definitions and assembly plugin discovery for agents, tools, and evals
 - **Multi-Workspace Runtime** — Multiple isolated workspaces within a single Orleans silo with dynamic hot-reload
 - **Group Directory** — Organizational multi-tenancy: groups own sessions, members, and default workspaces
+- **Desktop Assistant** — Avalonia.FuncUI chat app with an embedded ASP.NET Core + Orleans server: real-time execution-trace streaming, dark/light theme switching, and a localizable UI
 - **F# First** — Immutable records, discriminated unions, and functional composition throughout
 
 ## Project Structure
@@ -66,9 +67,15 @@ Nao.slnx
 │   ├── Nao.Eval/               # Evaluation framework: test cases, evaluators, LLM judge
 │   ├── Nao.Loader/             # Workspace loader: JSON defs, multi-mode execution, plugins
 │   ├── Nao.Providers/          # LLM provider implementations
-│   └── Nao.Runtime.Orleans/    # Distributed runtime (grains, workspaces, groups)
-│       ├── Workspace/           # WorkspaceRegistry (multi-tenant workspace isolation)
-│       └── Grains/              # SessionGrain, SessionDirectory, GroupDirectory
+│   ├── Nao.Runtime.Orleans/    # Distributed runtime (grains, workspaces, groups)
+│   │   ├── Workspace/           # WorkspaceRegistry (multi-tenant workspace isolation)
+│   │   └── Grains/              # SessionGrain, SessionDirectory, GroupDirectory
+│   └── Nao.Assistant/          # Avalonia.FuncUI desktop chat app (embedded server + UI)
+│       ├── Domain/              # Contracts, AppSettings (theme/language persistence)
+│       ├── Server/              # Embedded ASP.NET Core + Orleans host, WS streaming
+│       ├── Client/              # NaoClient WebSocket client
+│       ├── Components/          # Theme, Localization, reusable FuncUI controls
+│       └── Views/               # Shell, SessionView, SettingsView, BuilderView
 └── tests/
     ├── Nao.Core.Tests/
     ├── Nao.Agents.Tests/        # Unit tests for all ETCLOVG layers
@@ -76,6 +83,7 @@ Nao.slnx
     ├── Nao.Loader.Tests/
     ├── Nao.Providers.Tests/
     ├── Nao.Runtime.Orleans.Tests/
+    ├── Nao.Assistant.Tests/
     └── Nao.E2E.Tests/           # End-to-end: orchestration + full ETCLOVG harness demos
 ```
 
@@ -475,6 +483,23 @@ let prompt =
         Examples = [ { Input = "Q1 revenue?"; Output = "$2.3B"; Explanation = None } ]
         OutputFormat = Json (Some """{"summary": "...", "trend": "..."}""") }
 ```
+
+## Desktop Assistant
+
+`Nao.Assistant` is a cross-platform desktop chat client built with [Avalonia](https://avaloniaui.net/) and [Avalonia.FuncUI](https://github.com/fsprojects/Avalonia.FuncUI), styled with [Semi.Avalonia](https://github.com/irihitech/Semi.Avalonia). It hosts an **embedded ASP.NET Core + Orleans server** in-process, so a single executable provides both the runtime and the UI.
+
+```bash
+dotnet run --project src/Nao.Assistant
+```
+
+Highlights:
+
+- **Live execution trace** — As a turn runs, the assistant streams what it is doing (reasoning, tool calls, sub-agent steps) over a WebSocket and renders the process *above* the final answer in real time, instead of hiding it behind a "details" toggle.
+- **Theme switching** — Dark and light themes are selectable from Settings, applied instantly via centralized design tokens, and persisted across launches.
+- **Localizable UI** — UI strings flow through a central `Localization` table (English today), with a language selector wired into Settings for future translations.
+- **Persisted preferences** — Theme, language, provider, orchestrator, and workspace settings are stored in `AppSettings` and reloaded on startup.
+
+LLM turns can run well beyond Orleans' default 30s grain-response timeout, so the embedded host raises the silo/client `ResponseTimeout` accordingly.
 
 ## Package Management
 

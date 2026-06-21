@@ -92,6 +92,40 @@ type JsonSourceTests() =
         | Result.Error e -> Assert.Fail(LoadError.format e)
 
     [<TestMethod>]
+    member _.LoadsToolRuntimeFromJson() =
+        let json = """{
+            "name": "ts-tool",
+            "description": "A TypeScript tool",
+            "command": "tool.ts",
+            "runtime": "deno"
+        }"""
+        File.WriteAllText(Path.Combine(tempDir, "tools", "ts-tool.json"), json)
+
+        let source = JsonSource.fromDirectory tempDir
+        let result = source.Load()
+
+        Assert.AreEqual(1, result.Tools.Length)
+        match result.Tools.[0] with
+        | Result.Ok def -> Assert.AreEqual("deno", def.Runtime)
+        | Result.Error e -> Assert.Fail(LoadError.format e)
+
+    [<TestMethod>]
+    member _.ToolRuntimeDefaultsToEmpty() =
+        let json = """{
+            "name": "plain-tool",
+            "description": "No runtime declared",
+            "command": "echo"
+        }"""
+        File.WriteAllText(Path.Combine(tempDir, "tools", "plain-tool.json"), json)
+
+        let source = JsonSource.fromDirectory tempDir
+        let result = source.Load()
+
+        match result.Tools.[0] with
+        | Result.Ok def -> Assert.AreEqual("", def.Runtime)
+        | Result.Error e -> Assert.Fail(LoadError.format e)
+
+    [<TestMethod>]
     member _.LoadsEvalSuiteFromJson() =
         let json = """{
             "name": "qa-suite",

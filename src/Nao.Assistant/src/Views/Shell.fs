@@ -23,11 +23,13 @@ module Shell =
     type ActiveView =
         | SessionTab of int
         | Settings
+        | Workshop
 
     type ShellState =
         { Sessions: SessionView.SessionState list
           ActiveView: ActiveView
           SettingsState: SettingsView.SettingsState
+          BuilderState: BuilderView.BuilderState
           ServerStartup: ServerStartupState
           Client: NaoClient option }
 
@@ -39,8 +41,10 @@ module Shell =
         | SelectSession of int
         | CloseSession of int
         | OpenSettings
+        | OpenWorkshop
         | SessionMsg of int * SessionView.Msg
         | SettingsMsg of SettingsView.Msg
+        | BuilderMsg of BuilderView.Msg
 
     let private startupCmd (settings: AppSettings) : Cmd<ShellMsg> =
         [ fun dispatch ->
@@ -61,7 +65,12 @@ module Shell =
                                       SessionView.Input = ""
                                       SessionView.Chat = SessionView.Idle
                                       SessionView.History = SessionView.NeedsLoad
-                                      SessionView.Feedback = None } : SessionView.SessionState)
+                                      SessionView.LiveSteps = []
+                                      SessionView.Feedback = None
+                                      SessionView.AvailableAgents = []
+                                      SessionView.SelectedAgent = "nao-assistant"
+                                      SessionView.AgentsLoaded = false
+                                      SessionView.AttachedFile = None } : SessionView.SessionState)
                             else
                                 [ SessionView.createNew () ]
 
@@ -75,12 +84,16 @@ module Shell =
 
     let init () : ShellState * Cmd<ShellMsg> =
         let settings = AppSettingsStore.load ()
+        // Apply the persisted appearance before the first render.
+        Theme.apply (Theme.parse settings.Theme)
+        Localization.apply (Localization.parse settings.Language)
         { Sessions = []
           ActiveView = SessionTab 0
           SettingsState =
             { Settings = settings
               IsDirty = false
               StatusMessage = "" }
+          BuilderState = BuilderView.init ()
           ServerStartup = Starting
           Client = None },
         startupCmd settings
@@ -91,8 +104,11 @@ module Shell =
             let trigger =
                 match sessions with
                 | first :: _ when first.ServerSessionId.IsSome ->
-                    Cmd.ofMsg (SessionMsg (0, SessionView.TriggerHistoryLoad))
-                | _ -> Cmd.none
+                    Cmd.batch
+                        [ Cmd.ofMsg (SessionMsg (0, SessionView.TriggerHistoryLoad))
+                          Cmd.ofMsg (SessionMsg (0, SessionView.TriggerAgentsLoad)) ]
+                | _ ->
+                    Cmd.ofMsg (SessionMsg (0, SessionView.TriggerAgentsLoad))
             { model with
                 Sessions = sessions
                 ActiveView = SessionTab 0
@@ -112,7 +128,7 @@ module Shell =
             { model with
                 Sessions = model.Sessions @ [ session ]
                 ActiveView = SessionTab idx },
-            Cmd.none
+            Cmd.ofMsg (SessionMsg (idx, SessionView.TriggerAgentsLoad))
 
         | SelectSession i ->
             if i < 0 || i >= model.Sessions.Length then
@@ -131,9 +147,11 @@ module Shell =
                             s)
                 let trigger =
                     if sessions.[i].ServerSessionId.IsSome then
-                        Cmd.ofMsg (SessionMsg (i, SessionView.TriggerHistoryLoad))
+                        Cmd.batch
+                            [ Cmd.ofMsg (SessionMsg (i, SessionView.TriggerHistoryLoad))
+                              Cmd.ofMsg (SessionMsg (i, SessionView.TriggerAgentsLoad)) ]
                     else
-                        Cmd.none
+                        Cmd.ofMsg (SessionMsg (i, SessionView.TriggerAgentsLoad))
                 { model with Sessions = sessions; ActiveView = SessionTab i }, trigger
 
         | CloseSession i ->
@@ -151,6 +169,17 @@ module Shell =
         | OpenSettings ->
             { model with ActiveView = Settings }, Cmd.none
 
+        | OpenWorkshop ->
+            { model with ActiveView = Workshop }, Cmd.ofMsg (BuilderMsg BuilderView.TriggerLoad)
+
+        | BuilderMsg builderMsg ->
+            match model.Client with
+            | Some client ->
+                let updated, cmd = BuilderView.update client builderMsg model.BuilderState
+                { model with BuilderState = updated }, Cmd.map BuilderMsg cmd
+            | None ->
+                model, Cmd.none
+
         | SessionMsg (i, sessionMsg) ->
             match model.Client with
             | Some client when i >= 0 && i < model.Sessions.Length ->
@@ -165,6 +194,9 @@ module Shell =
         | SettingsMsg settingsMsg ->
             match settingsMsg with
             | SettingsView.SettingsChanged newSettings ->
+                // Apply appearance immediately so the theme/language toggle is live.
+                Theme.apply (Theme.parse newSettings.Theme)
+                Localization.apply (Localization.parse newSettings.Language)
                 { model with
                     SettingsState =
                         { model.SettingsState with
@@ -185,10 +217,10 @@ module Shell =
     let private tabBar (model: ShellState) (dispatch: ShellMsg -> unit) : Avalonia.FuncUI.Types.IView =
         Border.create [
             Border.dock Dock.Top
-            Border.padding (8.0, 4.0)
-            Border.background (SolidColorBrush(Color.Parse("#18181B")))
+            Border.padding (8.0, 6.0)
+            Border.background Theme.surface
             Border.borderThickness (0.0, 0.0, 0.0, 1.0)
-            Border.borderBrush (SolidColorBrush(Color.Parse("#3F3F46")))
+            Border.borderBrush Theme.border
             Border.child (
                 DockPanel.create [
                     DockPanel.lastChildFill true
@@ -203,9 +235,20 @@ module Shell =
                                     Button.content "+"
                                     Button.fontSize 16.0
                                     Button.padding (8.0, 2.0)
-                                    Button.background Brushes.Transparent
-                                    Button.foreground Brushes.White
+                                    Button.background Theme.transparent
+                                    Button.foreground Theme.textSecondary
                                     Button.onClick (fun _ -> dispatch NewSession)
+                                ]
+                                Button.create [
+                                    Button.content "\U0001F527"
+                                    Button.fontSize 16.0
+                                    Button.padding (8.0, 2.0)
+                                    Button.background (
+                                        match model.ActiveView with
+                                        | Workshop -> Theme.surfaceHover
+                                        | _ -> Theme.transparent)
+                                    Button.foreground Theme.textPrimary
+                                    Button.onClick (fun _ -> dispatch OpenWorkshop)
                                 ]
                                 Button.create [
                                     Button.content "⚙"
@@ -213,9 +256,9 @@ module Shell =
                                     Button.padding (8.0, 2.0)
                                     Button.background (
                                         match model.ActiveView with
-                                        | Settings -> SolidColorBrush(Color.Parse("#3F3F46")) :> IBrush
-                                        | _ -> Brushes.Transparent :> IBrush)
-                                    Button.foreground Brushes.White
+                                        | Settings -> Theme.surfaceHover
+                                        | _ -> Theme.transparent)
+                                    Button.foreground Theme.textPrimary
                                     Button.onClick (fun _ ->
                                         dispatch OpenSettings)
                                 ]
@@ -241,9 +284,8 @@ module Shell =
                                                 Border.padding (10.0, 4.0)
                                                 Border.cornerRadius (6.0, 6.0, 0.0, 0.0)
                                                 Border.background (
-                                                    if isActive
-                                                    then SolidColorBrush(Color.Parse("#27272A")) :> IBrush
-                                                    else Brushes.Transparent :> IBrush)
+                                                    if isActive then Theme.surfaceRaised
+                                                    else Theme.transparent)
                                                 Border.child (
                                                     StackPanel.create [
                                                         StackPanel.orientation Orientation.Horizontal
@@ -251,10 +293,10 @@ module Shell =
                                                         StackPanel.children [
                                                             Button.create [
                                                                 Button.content session.Title
-                                                                Button.background Brushes.Transparent
+                                                                Button.background Theme.transparent
                                                                 Button.foreground (
-                                                                    if isActive then Brushes.White :> IBrush
-                                                                    else SolidColorBrush(Color.Parse("#A1A1AA")) :> IBrush)
+                                                                    if isActive then Theme.textPrimary
+                                                                    else Theme.textSecondary)
                                                                 Button.padding (4.0, 2.0)
                                                                 Button.onClick (fun _ ->
                                                                     dispatch (SelectSession i))
@@ -264,8 +306,8 @@ module Shell =
                                                                     Button.content "×"
                                                                     Button.fontSize 12.0
                                                                     Button.padding (2.0, 0.0)
-                                                                    Button.background Brushes.Transparent
-                                                                    Button.foreground (SolidColorBrush(Color.Parse("#71717A")))
+                                                                    Button.background Theme.transparent
+                                                                    Button.foreground Theme.textMuted
                                                                     Button.onClick (fun _ ->
                                                                         dispatch (CloseSession i))
                                                                 ]
@@ -286,7 +328,7 @@ module Shell =
         match model.ServerStartup with
             | Starting ->
                 Grid.create [
-                    Grid.background (SolidColorBrush(Color.Parse("#09090B")))
+                    Grid.background Theme.bg
                     Grid.children [
                         StackPanel.create [
                             StackPanel.horizontalAlignment HorizontalAlignment.Center
@@ -297,7 +339,7 @@ module Shell =
                                 TextBlock.create [
                                     TextBlock.text "Starting local server..."
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
-                                    TextBlock.foreground Brushes.White
+                                    TextBlock.foreground Theme.textPrimary
                                     TextBlock.fontSize 16.0
                                 ]
                                 ProgressBar.create [
@@ -307,7 +349,7 @@ module Shell =
                                 TextBlock.create [
                                     TextBlock.text "Preparing sessions and runtime"
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
-                                    TextBlock.foreground (SolidColorBrush(Color.Parse("#A1A1AA")))
+                                    TextBlock.foreground Theme.textSecondary
                                 ]
                             ]
                         ]
@@ -315,7 +357,7 @@ module Shell =
                 ]
             | Failed err ->
                 Grid.create [
-                    Grid.background (SolidColorBrush(Color.Parse("#09090B")))
+                    Grid.background Theme.bg
                     Grid.children [
                         StackPanel.create [
                             StackPanel.horizontalAlignment HorizontalAlignment.Center
@@ -325,13 +367,13 @@ module Shell =
                             StackPanel.children [
                                 TextBlock.create [
                                     TextBlock.text "Server failed to start"
-                                    TextBlock.foreground Brushes.White
+                                    TextBlock.foreground Theme.textPrimary
                                     TextBlock.fontSize 18.0
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
                                 ]
                                 SelectableTextBlock.create [
                                     SelectableTextBlock.text err
-                                    SelectableTextBlock.foreground (SolidColorBrush(Color.Parse("#FCA5A5")))
+                                    SelectableTextBlock.foreground Theme.danger
                                     SelectableTextBlock.textWrapping TextWrapping.Wrap
                                 ]
                                 Button.create [
@@ -345,26 +387,36 @@ module Shell =
                     ]
                 ]
             | Started _ ->
-                DockPanel.create [
-                    DockPanel.lastChildFill true
-                    DockPanel.background (SolidColorBrush(Color.Parse("#09090B")))
-                    DockPanel.children [
-                        // Tab bar
+                Grid.create [
+                    Grid.background Theme.bg
+                    Grid.rowDefinitions "Auto,*"
+                    Grid.children [
+                        // Tab bar (row 0)
                         tabBar model dispatch
 
-                        // Content area
-                        match model.ActiveView with
-                        | Settings ->
-                            SettingsView.view (SettingsMsg >> dispatch) model.SettingsState
+                        // Content area (row 1) — wrapped so it is constrained to the
+                        // remaining height; otherwise the bottom of the hosted view is
+                        // clipped by the tab bar's height.
+                        Panel.create [
+                            Grid.row 1
+                            Panel.children [
+                                match model.ActiveView with
+                                | Settings ->
+                                    SettingsView.view (SettingsMsg >> dispatch) model.SettingsState
 
-                        | SessionTab idx ->
-                            if idx >= 0 && idx < model.Sessions.Length then
-                                SessionView.view (fun m -> dispatch (SessionMsg (idx, m))) model.Sessions.[idx]
-                            else
-                                TextBlock.create [
-                                    TextBlock.text "No session selected"
-                                    TextBlock.horizontalAlignment HorizontalAlignment.Center
-                                    TextBlock.verticalAlignment VerticalAlignment.Center
-                                ]
+                                | Workshop ->
+                                    BuilderView.view (BuilderMsg >> dispatch) model.BuilderState
+
+                                | SessionTab idx ->
+                                    if idx >= 0 && idx < model.Sessions.Length then
+                                        SessionView.view (fun m -> dispatch (SessionMsg (idx, m))) model.Sessions.[idx]
+                                    else
+                                        TextBlock.create [
+                                            TextBlock.text "No session selected"
+                                            TextBlock.horizontalAlignment HorizontalAlignment.Center
+                                            TextBlock.verticalAlignment VerticalAlignment.Center
+                                        ]
+                            ]
+                        ]
                     ]
                 ]

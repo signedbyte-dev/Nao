@@ -3,12 +3,33 @@ namespace Nao.Runtime.Orleans
 open System
 open System.Threading.Tasks
 open Nao.Core
+open Orleans
+
+/// A single step in the process an agent ran to produce a turn's answer
+/// (a tool invocation or a sub-agent delegation). Surfaced to the frontend so the
+/// whole process — not just the final answer — is visible.
+[<GenerateSerializer>]
+type TurnStepRecord() =
+    /// "tool" | "agent" (extendable).
+    [<Id(0u)>] member val Kind: string = "" with get, set
+    /// Display title — typically the tool or sub-agent name.
+    [<Id(1u)>] member val Title: string = "" with get, set
+    /// Input passed to the tool / sub-agent.
+    [<Id(2u)>] member val Input: string = "" with get, set
+    /// Output the tool / sub-agent produced.
+    [<Id(3u)>] member val Output: string = "" with get, set
 
 /// A single persisted message in a conversation
 type PersistedMessage =
     { Role: string
       Content: string
-      Timestamp: DateTimeOffset }
+      Timestamp: DateTimeOffset
+      /// Turn this message belongs to ("" for legacy messages).
+      TurnId: string
+      /// Process steps for an assistant turn (empty for user messages / legacy).
+      Steps: TurnStepRecord[]
+      /// Names of files attached to a user message (empty for assistant / legacy).
+      Attachments: string[] }
 
 /// Metadata about a persisted conversation
 type ConversationMeta =

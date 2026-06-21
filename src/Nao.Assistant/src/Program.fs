@@ -21,6 +21,9 @@ type MainWindow() as this =
         this.MinWidth <- 600.0
         this.MinHeight <- 400.0
 
+        // Expose this window so deeper views can open native dialogs (file pickers).
+        UiContext.topLevel <- Some (this :> Avalonia.Controls.TopLevel)
+
         Elmish.Program.mkProgram Shell.init Shell.update Shell.view
         |> Program.withHost this
         |> Elmish.Program.run
@@ -29,8 +32,14 @@ type App() =
     inherit Application()
 
     override this.Initialize() =
-        this.Styles.Add(FluentTheme())
-        this.RequestedThemeVariant <- Styling.ThemeVariant.Dark
+        // Semi.Avalonia is the app-wide design system: it restyles every default
+        // control (buttons, combo boxes, text boxes, scrollbars, progress bars) with a
+        // modern, cohesive look.
+        this.Styles.Add(Semi.Avalonia.SemiTheme())
+        // Apply the persisted appearance (theme + language) before the first window renders.
+        let settings = AppSettingsStore.load ()
+        Theme.apply (Theme.parse settings.Theme)
+        Localization.apply (Localization.parse settings.Language)
 
     override this.OnFrameworkInitializationCompleted() =
         match this.ApplicationLifetime with

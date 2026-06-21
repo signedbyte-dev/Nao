@@ -3,6 +3,7 @@
     <Project Path="src/Nao.Agents/Nao.Agents.fsproj" />
     <Project Path="src/Nao.Core/Nao.Core.fsproj" />
     <Project Path="src/Nao.Assistant/Nao.Assistant.fsproj" />
+    <Project Path="src/Nao.Documents/Nao.Documents.fsproj" />
     <Project Path="src/Nao.Eval/Nao.Eval.fsproj" />
     <Project Path="src/Nao.Feedback/Nao.Feedback.fsproj" />
     <Project Path="src/Nao.Loader/Nao.Loader.fsproj" />

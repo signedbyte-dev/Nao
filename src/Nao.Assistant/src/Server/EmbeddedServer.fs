@@ -6,6 +6,7 @@ open System.Net.WebSockets
 open System.Net.Sockets
 open System.Data.Common
 open System.Text
+open System.Text.RegularExpressions
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
@@ -26,285 +27,6 @@ open Nao.Persistence
 open Nao.Feedback
 open Nao.Runtime.Orleans
 open Nao.Runtime.Orleans.Grains
-
-/// Check if an LLM provider endpoint is reachable
-module ProviderHealth =
-
-    let checkAsync (settings: ProviderSettings) : Task<Result<string, string>> =
-        task {
-            try
-                use client = new System.Net.Http.HttpClient()
-                client.Timeout <- TimeSpan.FromSeconds(5.0)
-                match settings.ProviderType.ToLowerInvariant() with
-                | "ollama" ->
-                    let url = if String.IsNullOrWhiteSpace(settings.Endpoint) then "http://localhost:11434" else settings.Endpoint
-                    let! resp = client.GetAsync(url + "/api/tags")
-                    if resp.IsSuccessStatusCode then
-                        return Ok (sprintf "Ollama is running at %s" url)
-                    else
-                        return Error (sprintf "Ollama returned %d at %s" (int resp.StatusCode) url)
-                | "openai" ->
-                    let url = if String.IsNullOrWhiteSpace(settings.Endpoint) then "https://api.openai.com/v1" else settings.Endpoint
-                    let! resp = client.GetAsync(url + "/models")
-                    if int resp.StatusCode < 500 then
-                        return Ok (sprintf "OpenAI endpoint reachable at %s" url)
-                    else
-                        return Error (sprintf "OpenAI endpoint returned %d" (int resp.StatusCode))
-                | "anthropic" ->
-                    return Ok "Anthropic (API key validated at runtime)"
-                | other ->
-                    return Ok (sprintf "Provider '%s' — no health check available" other)
-            with ex ->
-                return Error (sprintf "Cannot reach provider: %s" ex.Message)
-        }
-
-module AssistantTools =
-
-    let private workDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nao-demo-workspace")
-
-    let private resolvePath (input: string) =
-        let name = input.Trim().Replace("\\", "/").TrimStart('/')
-        Path.GetFullPath(Path.Combine(workDir, name))
-
-    let ensureWorkDir () =
-        Directory.CreateDirectory(workDir) |> ignore
-        workDir
-
-    let createFolder: Tool =
-        Tool.Create("create_folder", "Create a new folder. Input: relative folder path.",
-            fun input -> task {
-                let path = resolvePath input
-                Directory.CreateDirectory(path) |> ignore
-                return sprintf """{"created":"%s","exists":true}""" (path.Replace("\\", "/"))
-            })
-
-    let writeFile: Tool =
-        Tool.Create("write_file", "Write content to a file. Input format: 'relative/path|content'.",
-            fun input -> task {
-                let parts = input.Split('|', 2)
-                if parts.Length < 2 then return """{"error":"Expected 'path|content'"}"""
-                else
-                    let path = resolvePath parts.[0]
-                    let dir = Path.GetDirectoryName(path)
-                    if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
-                    do! File.WriteAllTextAsync(path, parts.[1])
-                    return sprintf """{"written":"%s","bytes":%d}""" (path.Replace("\\", "/")) parts.[1].Length
-            })
-
-    let readFile: Tool =
-        Tool.Create("read_file", "Read content from a file. Input: relative file path.",
-            fun input -> task {
-                let path = resolvePath input
-                if File.Exists(path) then
-                    let! content = File.ReadAllTextAsync(path)
-                    return content
-                else
-                    return sprintf """{"error":"File not found: %s"}""" input
-            })
-
-    let listFolder: Tool =
-        Tool.Create("list_folder", "List directory contents. Input: relative path (empty for root).",
-            fun input -> task {
-                let path = if String.IsNullOrWhiteSpace(input) then workDir else resolvePath input
-                if not (Directory.Exists(path)) then
-                    return sprintf """{"error":"Directory not found: %s"}""" input
-                else
-                    let entries =
-                        Directory.GetFileSystemEntries(path)
-                        |> Array.map (fun e ->
-                            let name = Path.GetFileName(e)
-                            let isDir = Directory.Exists(e)
-                            sprintf """{"name":"%s","type":"%s"}""" name (if isDir then "dir" else "file"))
-                        |> String.concat ","
-                    return sprintf """{"path":"%s","entries":[%s]}""" (path.Replace("\\", "/")) entries
-            })
-
-    let delete: Tool =
-        Tool.Create("delete", "Delete a file or folder. Input: relative path.",
-            fun input -> task {
-                let path = resolvePath input
-                if File.Exists(path) then
-                    File.Delete(path)
-                    return sprintf """{"deleted":"%s","type":"file"}""" input
-                elif Directory.Exists(path) then
-                    Directory.Delete(path, true)
-                    return sprintf """{"deleted":"%s","type":"dir"}""" input
-                else
-                    return sprintf """{"error":"Not found: %s"}""" input
-            })
-
-    let dateTime: Tool =
-        Tool.Create("get_datetime", "Get the current date and time.",
-            fun _ -> task {
-                return DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss zzz")
-            })
-
-    let calculator: Tool =
-        Tool.Create("calculator", "Evaluate a simple math expression. Input: expression like '2 + 3'.",
-            fun input -> task {
-                try
-                    let parts = input.Trim().Split(' ')
-                    if parts.Length = 3 then
-                        let a = Double.Parse(parts.[0])
-                        let b = Double.Parse(parts.[2])
-                        let result =
-                            match parts.[1] with
-                            | "+" -> a + b | "-" -> a - b
-                            | "*" -> a * b | "/" -> if b <> 0.0 then a / b else Double.NaN
-                            | _ -> Double.NaN
-                        return sprintf """{"result":%g}""" result
-                    else
-                        return """{"error":"Expected format: 'a op b'"}"""
-                with ex ->
-                    return sprintf """{"error":"%s"}""" ex.Message
-            })
-
-    let allTools = [ createFolder; writeFile; readFile; listFolder; delete; dateTime; calculator ]
-
-
-module Database =
-
-    let dataDir =
-        // Default to a folder under the current working directory so the app's data
-        // (SQLite db, conversations, observability) lands in the repo and can be
-        // inspected. Override with NAO_DATA_DIR to point elsewhere.
-        let dir =
-            match Environment.GetEnvironmentVariable("NAO_DATA_DIR") with
-            | path when not (String.IsNullOrWhiteSpace path) -> path
-            | _ -> Path.Combine(Environment.CurrentDirectory, ".nao-data")
-        Directory.CreateDirectory(dir) |> ignore
-        dir
-
-    let dbPath = Path.Combine(dataDir, "nao.db")
-    let connectionString = sprintf "Data Source=%s;" dbPath
-
-    let initialize () =
-        DbProviderFactories.RegisterFactory("System.Data.SQLite", Microsoft.Data.Sqlite.SqliteFactory.Instance)
-
-        use conn = new Microsoft.Data.Sqlite.SqliteConnection(connectionString)
-        conn.Open()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- """
-            CREATE TABLE IF NOT EXISTS OrleansQuery (
-                QueryKey TEXT NOT NULL,
-                QueryText TEXT NOT NULL,
-                CONSTRAINT OrleansQuery_Key PRIMARY KEY (QueryKey)
-            );
-
-            CREATE TABLE IF NOT EXISTS OrleansStorage (
-                GrainIdHash INT NOT NULL,
-                GrainIdN0 BIGINT NOT NULL,
-                GrainIdN1 BIGINT NOT NULL,
-                GrainTypeHash INT NOT NULL,
-                GrainTypeString NVARCHAR(512) NOT NULL,
-                GrainIdExtensionString NVARCHAR(512) NULL,
-                ServiceId NVARCHAR(150) NOT NULL,
-                PayloadBinary BLOB NULL,
-                ModifiedOn DATETIME NOT NULL,
-                Version INT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS IX_OrleansStorage ON OrleansStorage(GrainIdHash, GrainTypeHash);
-
-            INSERT OR IGNORE INTO OrleansQuery (QueryKey, QueryText) VALUES
-            ('WriteToStorageKey', '
-                BEGIN TRANSACTION;
-
-                CREATE TEMP TABLE IF NOT EXISTS OrleansStorageWriteState
-                (
-                    TotalChangesBefore INT NOT NULL
-                );
-                DELETE FROM OrleansStorageWriteState;
-                INSERT INTO OrleansStorageWriteState (TotalChangesBefore) VALUES (total_changes() + 1);
-
-                UPDATE OrleansStorage
-                SET
-                    PayloadBinary = @PayloadBinary,
-                    ModifiedOn = datetime(''now''),
-                    Version = Version + 1
-                WHERE
-                    GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                    AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                    AND GrainTypeString = @GrainTypeString
-                    AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                    AND ServiceId = @ServiceId
-                    AND Version = @GrainStateVersion;
-
-                INSERT INTO OrleansStorage (GrainIdHash, GrainIdN0, GrainIdN1, GrainTypeHash, GrainTypeString, GrainIdExtensionString, ServiceId, PayloadBinary, ModifiedOn, Version)
-                SELECT @GrainIdHash, @GrainIdN0, @GrainIdN1, @GrainTypeHash, @GrainTypeString, @GrainIdExtensionString, @ServiceId, @PayloadBinary, datetime(''now''), 1
-                WHERE changes() = 0
-                  AND @GrainStateVersion IS NULL
-                  AND NOT EXISTS (
-                    SELECT 1 FROM OrleansStorage
-                    WHERE GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                        AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                        AND GrainTypeString = @GrainTypeString
-                        AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                        AND ServiceId = @ServiceId
-                  );
-
-                SELECT Version AS NewGrainStateVersion FROM OrleansStorage
-                WHERE total_changes() > (SELECT TotalChangesBefore FROM OrleansStorageWriteState LIMIT 1)
-                    AND GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                    AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                    AND GrainTypeString = @GrainTypeString
-                    AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                    AND ServiceId = @ServiceId;
-
-                SELECT @GrainStateVersion AS NewGrainStateVersion
-                WHERE total_changes() = (SELECT TotalChangesBefore FROM OrleansStorageWriteState LIMIT 1)
-                    AND @GrainStateVersion IS NOT NULL;
-
-                COMMIT;
-            ');
-
-            INSERT OR IGNORE INTO OrleansQuery (QueryKey, QueryText) VALUES
-            ('ReadFromStorageKey', '
-                SELECT
-                    PayloadBinary,
-                    Version AS Version
-                FROM
-                    OrleansStorage
-                WHERE
-                    GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                    AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                    AND GrainTypeString = @GrainTypeString
-                    AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                    AND ServiceId = @ServiceId
-                LIMIT 1;
-            ');
-
-            INSERT OR IGNORE INTO OrleansQuery (QueryKey, QueryText) VALUES
-            ('ClearStorageKey', '
-                UPDATE OrleansStorage
-                SET
-                    PayloadBinary = NULL,
-                    ModifiedOn = datetime(''now''),
-                    Version = Version + 1
-                WHERE
-                    GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                    AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                    AND GrainTypeString = @GrainTypeString
-                    AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                    AND ServiceId = @ServiceId
-                    AND Version = @GrainStateVersion;
-
-                SELECT Version AS NewGrainStateVersion FROM OrleansStorage
-                WHERE changes() > 0
-                    AND GrainIdHash = @GrainIdHash AND GrainTypeHash = @GrainTypeHash
-                    AND GrainIdN0 = @GrainIdN0 AND GrainIdN1 = @GrainIdN1
-                    AND GrainTypeString = @GrainTypeString
-                    AND (GrainIdExtensionString = @GrainIdExtensionString OR (GrainIdExtensionString IS NULL AND @GrainIdExtensionString IS NULL))
-                    AND ServiceId = @ServiceId;
-
-                SELECT @GrainStateVersion AS NewGrainStateVersion
-                WHERE changes() = 0
-                    AND @GrainStateVersion IS NOT NULL;
-            ');
-        """
-        cmd.ExecuteNonQuery() |> ignore
-
 
 module EmbeddedServer =
 
@@ -334,18 +56,84 @@ module EmbeddedServer =
         let opts = JsonSerializerOptions(PropertyNameCaseInsensitive = true)
         opts
 
+    /// Map a stored conversation message (including its process steps) to the wire DTO.
+    let private messageToDto (m: MessageRecord) : MessageDto =
+        let steps =
+            if isNull (box m.Steps) then [||]
+            else
+                m.Steps
+                |> Seq.map (fun s ->
+                    { TurnStepDto.Kind = s.Kind; Title = s.Title; Input = s.Input; Output = s.Output })
+                |> Seq.toArray
+        { MessageDto.Role = m.Role.ToLowerInvariant()
+          Content = m.Content
+          TurnId = (if isNull (box m.TurnId) then "" else m.TurnId)
+          Steps = steps
+          Attachments =
+            if isNull (box m.Attachments) then [||]
+            else m.Attachments |> Seq.toArray }
+
     let private sendWs (socket: WebSocket) (resp: WsResponse) = task {
         let json = JsonSerializer.Serialize(resp, jsonOptions)
         let bytes = Encoding.UTF8.GetBytes(json)
         do! socket.SendAsync(ArraySegment(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
     }
 
+    /// Augments a user message with relevant workspace knowledge before it reaches the
+    /// agent. Set in `start` to use the knowledge store; identity by default.
+    let mutable knowledgeAugment: string -> Task<string> = fun input -> Task.FromResult input
+
     let private handleWsMessage (socket: WebSocket) (grainFactory: IGrainFactory) (sessionId: string) (msg: WsRequest) = task {
         let session = grainFactory.GetGrain<ISessionGrain>(sessionId)
         try
             match msg.Type with
             | WsRequestType.Chat ->
-                let! response = session.ProcessAsync(msg.Payload)
+                // The payload is a structured ChatMessageRequest (text + attachments). The
+                // attachment content is embedded into the LLM prompt only; the transcript
+                // stores the text plus attachment names so the file body is never rendered.
+                // Fall back to treating the payload as plain text for older clients.
+                let request =
+                    try
+                        let r = JsonSerializer.Deserialize<ChatMessageRequest>(msg.Payload, jsonOptions)
+                        if isNull (box r) || (isNull (box r.Text) && isNull (box r.Attachments))
+                        then { Text = msg.Payload; Attachments = [||] }
+                        else r
+                    with _ -> { Text = msg.Payload; Attachments = [||] }
+
+                let text = if isNull request.Text then "" else request.Text
+                let attachments = if isNull (box request.Attachments) then [||] else request.Attachments
+                let attachmentNames = attachments |> Array.map (fun a -> a.Name)
+                let llmInput =
+                    if attachments.Length = 0 then text
+                    else
+                        let head = if String.IsNullOrWhiteSpace text then "" else text + "\n\n"
+                        let blocks =
+                            attachments
+                            |> Array.map (fun a ->
+                                sprintf "--- Attached file: %s ---\n%s" a.Name (if isNull a.Content then "" else a.Content))
+                            |> String.concat "\n\n"
+                        head + blocks
+
+                let! augmented = knowledgeAugment llmInput
+                // Run the turn while streaming the in-progress steps to the client, so the UI
+                // can show "what's been done so far" live. We poll the grain's reentrant
+                // GetLiveStepsAsync (which interleaves with the running turn) and push an
+                // Event frame whenever a new step appears, then a final Done frame.
+                let processTask = session.ProcessWithContextAsync(augmented, text, attachmentNames)
+                let mutable lastCount = -1
+                while not processTask.IsCompleted do
+                    let! _ = Task.WhenAny(processTask, Task.Delay(350))
+                    if not processTask.IsCompleted then
+                        let! steps = session.GetLiveStepsAsync()
+                        if steps.Length <> lastCount then
+                            lastCount <- steps.Length
+                            let dtos =
+                                steps
+                                |> Array.map (fun s ->
+                                    { TurnStepDto.Kind = s.Kind; Title = s.Title; Input = s.Input; Output = s.Output })
+                            let payload = JsonSerializer.Serialize({| steps = dtos |}, jsonOptions)
+                            do! sendWs socket { Type = WsResponseType.Event; Payload = payload }
+                let! response = processTask
                 do! sendWs socket { Type = WsResponseType.Done; Payload = response }
 
             | WsRequestType.Info ->
@@ -358,10 +146,7 @@ module EmbeddedServer =
 
             | WsRequestType.History ->
                 let! history = session.GetHistoryAsync()
-                let dtos =
-                    history |> Array.map (fun m ->
-                        { MessageDto.Role = m.Role.ToLowerInvariant()
-                          Content = m.Content })
+                let dtos = history |> Array.map messageToDto
                 let payload = JsonSerializer.Serialize(dtos, jsonOptions)
                 do! sendWs socket { Type = WsResponseType.History; Payload = payload }
 
@@ -737,6 +522,14 @@ module EmbeddedServer =
                         .Configure<ClusterOptions>(fun (opts: ClusterOptions) ->
                             opts.ClusterId <- "nao-desktop"
                             opts.ServiceId <- "nao-desktop")
+                        // LLM turns routinely run far longer than Orleans' default 30s
+                        // response timeout, so raise it for both the silo and the
+                        // co-hosted client to avoid spurious timeout exceptions.
+                        .Configure<SiloMessagingOptions>(fun (opts: SiloMessagingOptions) ->
+                            opts.ResponseTimeout <- TimeSpan.FromMinutes(10.0)
+                            opts.SystemResponseTimeout <- TimeSpan.FromMinutes(10.0))
+                        .Configure<ClientMessagingOptions>(fun (opts: ClientMessagingOptions) ->
+                            opts.ResponseTimeout <- TimeSpan.FromMinutes(10.0))
                     |> ignore)
                 |> ignore
 
@@ -831,11 +624,7 @@ module EmbeddedServer =
                 app.MapGet("/api/sessions/history/{**id}", Func<IGrainFactory, string, _>(fun grainFactory id -> task {
                     let session = grainFactory.GetGrain<ISessionGrain>(id)
                     let! history = session.GetHistoryAsync()
-                    let dtos =
-                        history
-                        |> Array.map (fun m ->
-                            { MessageDto.Role = m.Role.ToLowerInvariant()
-                              Content = m.Content })
+                    let dtos = history |> Array.map messageToDto
                     return Results.Ok(dtos)
                 })) |> ignore
 
@@ -849,6 +638,77 @@ module EmbeddedServer =
                 // Feedback / annotation / version / suggestion / candidate / register
                 // endpoints — shared with the standalone enhancement test host.
                 mapEnhancementEndpoints app workspaceRoot
+
+                // ─── Workspace knowledge base (RAG) ───
+                let knowledge = Knowledge.KnowledgeStore(workspaceRoot)
+                knowledgeAugment <- fun input -> task {
+                    let hits = knowledge.Retrieve input 4
+                    if List.isEmpty hits then return input
+                    else
+                        let ctxBlock =
+                            hits
+                            |> List.map (fun (f, t) -> sprintf "### From %s\n%s" f t)
+                            |> String.concat "\n\n"
+                        return sprintf "Relevant workspace knowledge:\n\n%s\n\n---\n\nUser question: %s" ctxBlock input
+                }
+
+                app.MapGet("/api/knowledge", Func<HttpContext, _>(fun _ctx -> task {
+                    return Results.Ok(knowledge.Files())
+                })) |> ignore
+
+                app.MapPost("/api/knowledge", Func<HttpContext, _>(fun ctx -> task {
+                    let! req = ctx.Request.ReadFromJsonAsync<KnowledgeUploadRequest>()
+                    if String.IsNullOrWhiteSpace req.Name then
+                        return Results.BadRequest({| error = "name is required" |})
+                    else
+                        knowledge.Save req.Name (req.Content |> Option.ofObj |> Option.defaultValue "")
+                        return Results.Ok({| saved = true; name = req.Name |})
+                })) |> ignore
+
+                app.MapDelete("/api/knowledge/{name}", Func<string, _>(fun name -> task {
+                    let ok = knowledge.Delete name
+                    return (if ok then Results.Ok({| deleted = true |}) else Results.NotFound())
+                })) |> ignore
+
+                // ─── List + LLM generation of tools and agents ───
+                app.MapGet("/api/tools", Func<IWorkspaceRegistry, _>(fun registry -> task {
+                    let defs = registry.Get WorkspaceId.defaultId
+                    let code =
+                        AssistantTools.allTools
+                        |> List.map (fun t -> ({ Name = t.Name; Description = t.Description; Source = "code" } : DefinitionInfoDto))
+                    let json =
+                        defs.ToolDefs
+                        |> List.map (fun d -> ({ Name = d.Name; Description = d.Description; Source = "json" } : DefinitionInfoDto))
+                    return Results.Ok(code @ json)
+                })) |> ignore
+
+                app.MapPost("/api/tools/generate", Func<HttpContext, ILlmProvider, _>(fun ctx provider -> task {
+                    let! req = ctx.Request.ReadFromJsonAsync<GenerateRequest>()
+                    let! result = Generation.generateTool provider req.Requirement
+                    match result with
+                    | Ok dto -> return Results.Ok(dto)
+                    | Error e -> return Results.BadRequest({| error = e |})
+                })) |> ignore
+
+                app.MapGet("/api/agents", Func<IWorkspaceRegistry, _>(fun registry -> task {
+                    let defs = registry.Get WorkspaceId.defaultId
+                    let agents =
+                        defs.AgentDefs
+                        |> List.map (fun a -> ({ Name = a.Name; Description = a.Description; Source = "json" } : DefinitionInfoDto))
+                    return Results.Ok(agents)
+                })) |> ignore
+
+                app.MapPost("/api/agents/generate", Func<HttpContext, IWorkspaceRegistry, ILlmProvider, _>(fun ctx registry provider -> task {
+                    let! req = ctx.Request.ReadFromJsonAsync<GenerateRequest>()
+                    let defs = registry.Get WorkspaceId.defaultId
+                    let toolNames =
+                        (AssistantTools.allTools |> List.map (fun t -> t.Name))
+                        @ (defs.ToolDefs |> List.map (fun d -> d.Name))
+                    let! result = Generation.generateAgent provider toolNames req.Requirement
+                    match result with
+                    | Ok dto -> return Results.Ok(dto)
+                    | Error e -> return Results.BadRequest({| error = e |})
+                })) |> ignore
 
                 app.Map("/ws/sessions/{**id}", Func<HttpContext, IGrainFactory, string, _>(fun ctx grainFactory id -> task {
                     if ctx.WebSockets.IsWebSocketRequest then

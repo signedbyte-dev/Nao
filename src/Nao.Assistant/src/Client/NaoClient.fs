@@ -229,6 +229,66 @@ type NaoClient(baseUrl: string) =
         return result.path
     }
 
+    /// List the tools available in the workspace (code + JSON definitions).
+    member _.ListToolsAsync() : Task<DefinitionInfoDto list> = task {
+        let! resp = http.GetAsync("/api/tools")
+        do! ensureSuccess resp
+        let! items = resp.Content.ReadFromJsonAsync<DefinitionInfoDto[]>(jsonOptions)
+        return Array.toList items
+    }
+
+    /// Ask the configured LLM to generate a tool definition from a requirement.
+    member _.GenerateToolAsync(requirement: string) : Task<GeneratedDefinitionDto> = task {
+        let! resp = http.PostAsJsonAsync("/api/tools/generate", { Requirement = requirement }, jsonOptions)
+        do! ensureSuccess resp
+        return! resp.Content.ReadFromJsonAsync<GeneratedDefinitionDto>(jsonOptions)
+    }
+
+    /// List the agent definitions available in the workspace.
+    member _.ListAgentsAsync() : Task<DefinitionInfoDto list> = task {
+        let! resp = http.GetAsync("/api/agents")
+        do! ensureSuccess resp
+        let! items = resp.Content.ReadFromJsonAsync<DefinitionInfoDto[]>(jsonOptions)
+        return Array.toList items
+    }
+
+    /// Ask the configured LLM to generate an agent definition from a requirement.
+    member _.GenerateAgentAsync(requirement: string) : Task<GeneratedDefinitionDto> = task {
+        let! resp = http.PostAsJsonAsync("/api/agents/generate", { Requirement = requirement }, jsonOptions)
+        do! ensureSuccess resp
+        return! resp.Content.ReadFromJsonAsync<GeneratedDefinitionDto>(jsonOptions)
+    }
+
+    /// Register a tool from a raw JSON string (e.g. an LLM-generated definition).
+    member this.RegisterToolJsonAsync(name: string, json: string) : Task<string> =
+        let element = JsonSerializer.Deserialize<JsonElement>(json, jsonOptions)
+        this.RegisterToolAsync({ Name = name; Definition = element })
+
+    /// Register an agent from a raw JSON string (e.g. an LLM-generated definition).
+    member this.RegisterAgentJsonAsync(name: string, json: string) : Task<string> =
+        let element = JsonSerializer.Deserialize<JsonElement>(json, jsonOptions)
+        this.RegisterAgentAsync({ Name = name; Definition = element })
+
+    /// List uploaded knowledge files with chunk counts.
+    member _.ListKnowledgeAsync() : Task<KnowledgeFileDto list> = task {
+        let! resp = http.GetAsync("/api/knowledge")
+        do! ensureSuccess resp
+        let! items = resp.Content.ReadFromJsonAsync<KnowledgeFileDto[]>(jsonOptions)
+        return Array.toList items
+    }
+
+    /// Upload (or overwrite) a knowledge file's text content into the workspace.
+    member _.UploadKnowledgeAsync(name: string, content: string) : Task<unit> = task {
+        let! resp = http.PostAsJsonAsync("/api/knowledge", { Name = name; Content = content }, jsonOptions)
+        do! ensureSuccess resp
+    }
+
+    /// Delete a knowledge file from the workspace.
+    member _.DeleteKnowledgeAsync(name: string) : Task<bool> = task {
+        let! resp = http.DeleteAsync(sprintf "/api/knowledge/%s" (Uri.EscapeDataString name))
+        return! okOrNotFound resp
+    }
+
     /// List all cross-session improvement suggestions.
     member _.ListSuggestionsAsync() : Task<Suggestion list> = task {
         let! resp = http.GetAsync("/api/suggestions")
@@ -285,7 +345,21 @@ type NaoClient(baseUrl: string) =
 
     /// Send a chat message (response comes as Chunk/Done events).
     member _.SendChatAsync(message: string) : Task =
-        sendWs { Type = WsRequestType.Chat; Payload = message }
+        let request = { Text = message; Attachments = [||] }
+        let payload = JsonSerializer.Serialize(request, jsonOptions)
+        sendWs { Type = WsRequestType.Chat; Payload = payload }
+
+    /// Send a structured chat message with attached files. The attachment content is sent
+    /// to the agent but not rendered back into the transcript.
+    member _.SendChatAsync(text: string, attachments: (string * string) list) : Task =
+        let request =
+            { Text = text
+              Attachments =
+                attachments
+                |> List.map (fun (name, content) -> { AttachmentDto.Name = name; Content = content })
+                |> List.toArray }
+        let payload = JsonSerializer.Serialize(request, jsonOptions)
+        sendWs { Type = WsRequestType.Chat; Payload = payload }
 
     /// Request session info (response comes as Info event).
     member _.RequestInfoAsync() : Task =
@@ -309,6 +383,11 @@ type NaoClient(baseUrl: string) =
 
     /// Send a chat message and wait for the full response (blocking convenience method).
     member this.ChatAsync(sessionId: string, message: string) : Task<string> = task {
+        return! this.ChatAsync(sessionId, message, [])
+    }
+
+    /// Send a chat message with attachments and wait for the full response.
+    member this.ChatAsync(sessionId: string, text: string, attachments: (string * string) list) : Task<string> = task {
         if ws.IsNone || ws.Value.State <> WebSocketState.Open then
             do! this.ConnectAsync(sessionId)
 
@@ -320,13 +399,39 @@ type NaoClient(baseUrl: string) =
             | _ -> ())
 
         this.OnMessage.AddHandler handler
-        do! this.SendChatAsync(message)
+        do! this.SendChatAsync(text, attachments)
         let! result = tcs.Task
         this.OnMessage.RemoveHandler handler
         return result
     }
 
-    /// Disconnect WebSocket.
+    /// Send a chat message with attachments and wait for the full response, while invoking
+    /// `onSteps` with the live in-progress process steps as the server streams them. The
+    /// callback may fire several times (each with the cumulative steps so far) before the
+    /// final response is returned.
+    member this.ChatAsync(sessionId: string, text: string, attachments: (string * string) list, onSteps: TurnStepDto list -> unit) : Task<string> = task {
+        if ws.IsNone || ws.Value.State <> WebSocketState.Open then
+            do! this.ConnectAsync(sessionId)
+
+        let tcs = TaskCompletionSource<string>()
+        let handler = Handler<NaoEvent>(fun _ evt ->
+            match evt with
+            | NaoEvent.ServerEvent payload ->
+                try
+                    let env = JsonSerializer.Deserialize<StepsEventDto>(payload, jsonOptions)
+                    if not (isNull (box env)) && not (isNull (box env.Steps)) then
+                        onSteps (Array.toList env.Steps)
+                with _ -> ()
+            | NaoEvent.Done response -> tcs.TrySetResult(response) |> ignore
+            | NaoEvent.Error err -> tcs.TrySetException(Exception(err)) |> ignore
+            | _ -> ())
+
+        this.OnMessage.AddHandler handler
+        do! this.SendChatAsync(text, attachments)
+        let! result = tcs.Task
+        this.OnMessage.RemoveHandler handler
+        return result
+    }
     member _.DisconnectAsync() : Task = task {
         match ws with
         | Some socket when socket.State = WebSocketState.Open ->

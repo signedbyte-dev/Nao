@@ -15,6 +15,7 @@
     <Compile Include="src/JsonSourceTests.fs" />
     <Compile Include="src/AssemblySourceTests.fs" />
     <Compile Include="src/WorkspaceLoaderTests.fs" />
+    <Compile Include="src/RuntimeTests.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nao.Loader\Nao.Loader.fsproj" />

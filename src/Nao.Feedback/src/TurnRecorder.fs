@@ -2,6 +2,7 @@ namespace Nao.Feedback
 
 open System
 open System.Collections.Generic
+open Nao.Core
 open Nao.Agents
 
 /// An `IAgentEventSink` that accumulates the events of a single turn into a
@@ -20,6 +21,7 @@ type TurnRecorder(turnId: string, sessionId: string, userId: string,
     let sync = obj ()
     let toolCalls = ResizeArray<ToolCallRecord>()
     let subAgentCalls = ResizeArray<SubAgentCallRecord>()
+    let steps = ResizeArray<TurnStep>()
     let pendingTools = Dictionary<string, Queue<string>>()
     let pendingAgents = Dictionary<string, Queue<string>>()
     let mutable output = ""
@@ -38,6 +40,17 @@ type TurnRecorder(turnId: string, sessionId: string, userId: string,
         | _ -> None
 
     member _.TurnId = turnId
+
+    /// The ordered process steps — the orchestrator's reasoning per round plus each
+    /// tool/sub-agent call — as they happened. Lets a frontend show the whole process,
+    /// not just the final answer. The final round's reasoning (which IS the answer) is
+    /// omitted since the answer is shown separately.
+    member _.Steps : TurnStep list =
+        lock sync (fun () ->
+            steps
+            |> Seq.filter (fun s ->
+                not (s.Kind = "reasoning" && s.Output.Trim() = output.Trim()))
+            |> List.ofSeq)
 
     /// The accumulated record so far. Safe to call after the turn completes.
     member _.Snapshot() : TurnRecord =
@@ -58,6 +71,9 @@ type TurnRecorder(turnId: string, sessionId: string, userId: string,
         member _.Emit(event: AgentEvent) =
             lock sync (fun () ->
                 match event with
+                | AgentEvent.MessageAdded (Assistant, content) when not (String.IsNullOrWhiteSpace content) ->
+                    // Each round's assistant output: the orchestrator's reasoning / decision.
+                    steps.Add { Kind = "reasoning"; Title = "Reasoning"; Input = ""; Output = content }
                 | AgentEvent.InvokingTool (name, input) ->
                     enqueue pendingTools name input
                 | AgentEvent.ToolResult (name, result) ->
@@ -72,11 +88,13 @@ type TurnRecorder(turnId: string, sessionId: string, userId: string,
                           Input = toolInput
                           Output = result
                           Provenance = provenance }
+                    steps.Add { Kind = "tool"; Title = name; Input = toolInput; Output = result }
                 | AgentEvent.DelegatingToAgent (name, input) ->
                     enqueue pendingAgents name input
                 | AgentEvent.AgentResult (name, result) ->
                     let agentInput = dequeue pendingAgents name |> Option.defaultValue ""
                     subAgentCalls.Add { Name = name; Input = agentInput; Output = result }
+                    steps.Add { Kind = "agent"; Title = name; Input = agentInput; Output = result }
                 | AgentEvent.Completed answer ->
                     output <- answer
                 | _ -> ())

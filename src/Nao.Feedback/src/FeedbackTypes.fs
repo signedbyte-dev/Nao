@@ -32,6 +32,19 @@ type SubAgentCallRecord =
       /// Result returned by the sub-agent.
       Output: string }
 
+/// One step of the process an agent ran during a turn, captured in the order it
+/// happened (a tool invocation or a sub-agent delegation). Lets a frontend show the
+/// whole process — reasoning trail and tool calls — not just the final answer.
+type TurnStep =
+    { /// "tool" | "agent".
+      Kind: string
+      /// Display title — typically the tool or sub-agent name.
+      Title: string
+      /// Input passed to the tool / sub-agent.
+      Input: string
+      /// Output the tool / sub-agent produced.
+      Output: string }
+
 /// A complete record of one orchestration turn: the user prompt, the agent and
 /// tools that ran, and the final answer. This is the unit feedback is attached to.
 type TurnRecord =

@@ -4,12 +4,19 @@ open System
 open Orleans
 open Nao.Core
 open Nao.Agents
+open Nao.Runtime.Orleans
 
 /// Serializable record for a conversation message
 [<GenerateSerializer>]
 type MessageRecord() =
     [<Id(0u)>] member val Role: string = "" with get, set
     [<Id(1u)>] member val Content: string = "" with get, set
+    /// Turn this message belongs to ("" for legacy messages).
+    [<Id(2u)>] member val TurnId: string = "" with get, set
+    /// Process steps for an assistant turn (empty for user messages / legacy).
+    [<Id(3u)>] member val Steps: ResizeArray<TurnStepRecord> = ResizeArray() with get, set
+    /// Names of files attached to a user message (empty for assistant / legacy).
+    [<Id(4u)>] member val Attachments: ResizeArray<string> = ResizeArray() with get, set
 
 /// Serializable record for a memory entry
 [<GenerateSerializer>]
