@@ -167,6 +167,8 @@ When you need to use a tool, respond with EXACTLY this JSON format on a single l
 When you need to delegate to a sub-agent, respond with EXACTLY this JSON format:
 {"action":"delegate","name":"<agent_name>","input":"<input_string>"}
 
+Prefer delegating to a specialist sub-agent over invoking a tool when both could accomplish the task: the agent is purpose-built for it and may run the work in the background.
+
 When you have enough information to answer the user directly, just respond normally with your answer.
 Do NOT wrap your final answer in the action JSON format above. Only use the action JSON when invoking a tool or delegating.
 If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown, YAML), encode your final answer in that format."""
@@ -182,6 +184,13 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
     /// Override to add custom logic after a tool executes.
     abstract member OnToolResult: toolName: string * input: string * result: string -> unit
     default _.OnToolResult(_, _, _) = ()
+
+    /// Override to intercept delegation to a sub-agent before the default in-process call.
+    /// Return Some finalAnswer to finish the turn immediately with that answer — e.g. when
+    /// the delegation was handed off to a background task and the orchestrator should reply
+    /// with a token instead of blocking. Return None to fall back to in-process delegation.
+    abstract member TryHandleDelegationAsync: agentName: string * input: string -> Task<string option>
+    default _.TryHandleDelegationAsync(_, _) = Task.FromResult None
 
     /// Override to add custom logic after an agent round completes.
     abstract member OnRoundComplete: round: int * content: string -> unit
@@ -245,17 +254,26 @@ If the user requests output in a specific format (e.g. JSON, XML, CSV, Markdown,
 
                 | Some (DelegateToAgent (agentName, agentInput)) ->
                     emit (AgentEvent.DelegatingToAgent (agentName, agentInput))
-                    match config.SubAgents |> List.tryFind (fun a -> a.Id.Name = agentName) with
-                    | Some agent ->
-                        let! agentResult = agent.RunAsync agentInput
-                        emit (AgentEvent.AgentResult (agentName, agentResult))
-                        let resultMsg = { Role = User; Content = sprintf "[Agent Result from %s]: %s" agentName agentResult }
-                        conversation <- conversation @ [ resultMsg ]
+                    let! handled = this.TryHandleDelegationAsync(agentName, agentInput)
+                    match handled with
+                    | Some tokenAnswer ->
+                        // The delegation was handed off (e.g. to a background task); reply with
+                        // the token immediately instead of running the sub-agent inline.
+                        emit (AgentEvent.AgentResult (agentName, tokenAnswer))
+                        finalAnswer <- tokenAnswer
+                        finished <- true
                     | None ->
-                        let err = sprintf "Agent '%s' not found. Available agents: %s" agentName (config.SubAgents |> List.map (fun a -> a.Id.Name) |> String.concat ", ")
-                        emit (AgentEvent.RoundError err)
-                        let errMsg = { Role = User; Content = sprintf "[Error]: %s" err }
-                        conversation <- conversation @ [ errMsg ]
+                        match config.SubAgents |> List.tryFind (fun a -> a.Id.Name = agentName) with
+                        | Some agent ->
+                            let! agentResult = agent.RunAsync agentInput
+                            emit (AgentEvent.AgentResult (agentName, agentResult))
+                            let resultMsg = { Role = User; Content = sprintf "[Agent Result from %s]: %s" agentName agentResult }
+                            conversation <- conversation @ [ resultMsg ]
+                        | None ->
+                            let err = sprintf "Agent '%s' not found. Available agents: %s" agentName (config.SubAgents |> List.map (fun a -> a.Id.Name) |> String.concat ", ")
+                            emit (AgentEvent.RoundError err)
+                            let errMsg = { Role = User; Content = sprintf "[Error]: %s" err }
+                            conversation <- conversation @ [ errMsg ]
 
                 | Some (DelegateToAgent _) | Some (Think _) | Some (Respond _) | None ->
                     finalAnswer <- result.Content

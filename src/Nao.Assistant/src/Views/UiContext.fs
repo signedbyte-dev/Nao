@@ -30,3 +30,21 @@ module UiContext =
                     return None
             | None -> return None
         }
+
+    /// Open a native save dialog and write the given bytes to the chosen location.
+    /// Returns the saved file name, or None if cancelled / unavailable.
+    let saveBytesAsync (suggestedName: string) (bytes: byte[]) : Task<string option> =
+        task {
+            match topLevel with
+            | Some tl ->
+                let! file =
+                    tl.StorageProvider.SaveFilePickerAsync(
+                        FilePickerSaveOptions(Title = "Save file", SuggestedFileName = suggestedName))
+                match file with
+                | null -> return None
+                | f ->
+                    use! stream = f.OpenWriteAsync()
+                    do! stream.WriteAsync(bytes, 0, bytes.Length)
+                    return Some f.Name
+            | None -> return None
+        }

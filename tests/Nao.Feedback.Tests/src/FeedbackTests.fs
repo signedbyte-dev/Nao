@@ -35,6 +35,7 @@ let private agentDef (name: string) : AgentDef =
       SubAgents = []
       Options = CompletionOptions.Default
       MaxRounds = 1
+      IsAsync = false
       Provenance = None }
 
 [<TestClass>]

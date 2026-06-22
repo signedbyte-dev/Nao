@@ -21,6 +21,9 @@ module SessionView =
           Role: string
           Content: string
           Timestamp: DateTime
+          /// Server turn id this message belongs to ("" for unsynced/local messages).
+          /// Used to attach inline file/task chips to the message that produced them.
+          TurnId: string
           /// The whole process behind an assistant answer (empty for user messages).
           Steps: ExecutionTrace.Step list
           /// Sentiment ("positive"/"negative") once feedback has been submitted for this message.
@@ -67,7 +70,13 @@ module SessionView =
           /// Whether the agent list has been fetched yet.
           AgentsLoaded: bool
           /// A file attached to the next message: (fileName, content).
-          AttachedFile: (string * string) option }
+          AttachedFile: (string * string) option
+          /// Files stored for this session (uploads + tool/agent generated).
+          Files: SessionFileDto list
+          /// Async tasks spawned during this session (with live status).
+          Tasks: TaskDto list
+          /// Whether the "Files & Tasks" panel is expanded.
+          FilesPanelOpen: bool }
 
     let createNew () =
         { Id = Guid.NewGuid().ToString("N").[..7]
@@ -82,7 +91,10 @@ module SessionView =
           AvailableAgents = []
           SelectedAgent = "nao-assistant"
           AgentsLoaded = false
-          AttachedFile = None }
+          AttachedFile = None
+          Files = []
+          Tasks = []
+          FilesPanelOpen = false }
 
     type Msg =
         | TriggerHistoryLoad
@@ -102,6 +114,10 @@ module SessionView =
         | AttachFilePressed
         | FileAttached of string * string
         | AttachmentCleared
+        | FilesTasksLoaded of SessionFileDto list * TaskDto list
+        | RefreshFilesTasks
+        | ToggleFilesPanel
+        | DownloadFile of fileId: string * name: string
 
     /// Legacy marker: older sessions embedded an attached file inside the message text.
     /// Newer messages carry attachment names as structured metadata instead, but we still
@@ -147,6 +163,7 @@ module SessionView =
           Role = role
           Content = visible
           Timestamp = DateTime.Now
+          TurnId = (if isNull m.TurnId then "" else m.TurnId)
           Steps = steps
           FeedbackGiven = None
           Attachments = attachments }
@@ -157,6 +174,7 @@ module SessionView =
           Role = role
           Content = content
           Timestamp = DateTime.Now
+          TurnId = ""
           Steps = []
           FeedbackGiven = None
           Attachments = [] }
@@ -240,6 +258,47 @@ module SessionView =
                 :> Task)
                 |> ignore))
 
+    let private loadFilesTasksCmd (client: NaoClient) (sessionKey: string) : Cmd<Msg> =
+        cmdOfSub (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let! files = client.ListSessionFilesAsync(sessionKey)
+                        let! tasks = client.ListSessionTasksAsync(sessionKey)
+                        Dispatcher.UIThread.Post(fun () -> dispatch (FilesTasksLoaded (files, tasks)))
+                    with _ -> ()
+                }
+                :> Task)
+            |> ignore)
+
+    /// Re-poll files/tasks after a short delay (used to track in-progress async tasks).
+    let private pollFilesTasksCmd (client: NaoClient) (sessionKey: string) : Cmd<Msg> =
+        cmdOfSub (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    do! Task.Delay 1500
+                    try
+                        let! files = client.ListSessionFilesAsync(sessionKey)
+                        let! tasks = client.ListSessionTasksAsync(sessionKey)
+                        Dispatcher.UIThread.Post(fun () -> dispatch (FilesTasksLoaded (files, tasks)))
+                    with _ -> ()
+                }
+                :> Task)
+            |> ignore)
+
+    let private downloadFileCmd (client: NaoClient) (sessionKey: string) (fileId: string) (name: string) : Cmd<Msg> =
+        cmdOfSub (fun _ ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let! bytes = client.DownloadSessionFileAsync(sessionKey, fileId)
+                        Dispatcher.UIThread.Post(fun () ->
+                            (UiContext.saveBytesAsync name bytes :> Task) |> ignore)
+                    with _ -> ()
+                }
+                :> Task)
+            |> ignore)
+
     let private submitFeedbackCmd
         (client: NaoClient)
         (sessionId: string)
@@ -267,7 +326,8 @@ module SessionView =
         | TriggerHistoryLoad ->
             match model.ServerSessionId with
             | Some sessionId when model.History = NeedsLoad ->
-                { model with History = Loading }, loadHistoryCmd client sessionId
+                { model with History = Loading },
+                Cmd.batch [ loadHistoryCmd client sessionId; loadFilesTasksCmd client sessionId ]
             | _ ->
                 model, Cmd.none
 
@@ -315,13 +375,14 @@ module SessionView =
         | SendCompleted (Ok (sessionId, response)) ->
             let replyMsg = mkMessage "Nao" response
             // Reload the persisted transcript so the reply carries its full process
-            // (tool/sub-agent steps), which the chat call itself doesn't return.
+            // (tool/sub-agent steps), which the chat call itself doesn't return. Also
+            // refresh the session's files/tasks so any newly generated output appears.
             { model with
                 ServerSessionId = Some sessionId
                 Messages = model.Messages @ [ replyMsg ]
                 LiveSteps = []
                 Chat = Idle },
-            loadHistoryCmd client sessionId
+            Cmd.batch [ loadHistoryCmd client sessionId; loadFilesTasksCmd client sessionId ]
 
         | SendCompleted (Error err) ->
             let errorMsg = mkMessage "System" (sprintf "Error: %s" err)
@@ -383,6 +444,190 @@ module SessionView =
         | AttachmentCleared ->
             { model with AttachedFile = None }, Cmd.none
 
+        | FilesTasksLoaded (files, tasks) ->
+            // Keep polling while any task is still in flight so progress updates live.
+            let anyRunning =
+                tasks |> List.exists (fun t -> t.Status = AsyncTasks.Status.Pending || t.Status = AsyncTasks.Status.Running)
+            let poll =
+                match model.ServerSessionId with
+                | Some key when anyRunning -> pollFilesTasksCmd client key
+                | _ -> Cmd.none
+            { model with Files = files; Tasks = tasks }, poll
+
+        | RefreshFilesTasks ->
+            match model.ServerSessionId with
+            | Some key -> model, loadFilesTasksCmd client key
+            | None -> model, Cmd.none
+
+        | ToggleFilesPanel ->
+            { model with FilesPanelOpen = not model.FilesPanelOpen }, Cmd.none
+
+        | DownloadFile (fileId, name) ->
+            match model.ServerSessionId with
+            | Some key -> model, downloadFileCmd client key fileId name
+            | None -> model, Cmd.none
+
+    // ─── Files & Tasks rendering ───
+
+    /// Human-readable byte size.
+    let private fmtSize (bytes: int64) =
+        if bytes < 1024L then sprintf "%d B" bytes
+        elif bytes < 1024L * 1024L then sprintf "%.1f KB" (float bytes / 1024.0)
+        else sprintf "%.1f MB" (float bytes / 1048576.0)
+
+    /// Display label + accent brush for a task status.
+    let private taskStatusInfo (status: string) : string * IBrush =
+        match status with
+        | s when s = AsyncTasks.Status.Completed -> "Completed", Theme.success
+        | s when s = AsyncTasks.Status.Failed -> "Failed", Theme.danger
+        | s when s = AsyncTasks.Status.Running -> "Running", Theme.accent
+        | _ -> "Pending", Theme.warning
+
+    /// A small clickable chip (inline file/task tag).
+    let private chip (icon: string) (label: string) (accentBrush: IBrush) (onClick: unit -> unit) : Avalonia.FuncUI.Types.IView =
+        Button.create [
+            Button.margin (0.0, 4.0, 4.0, 0.0)
+            Button.padding (8.0, 4.0)
+            Button.background Theme.surfaceInset
+            Button.borderThickness 1.0
+            Button.borderBrush Theme.border
+            Button.cornerRadius 6.0
+            Button.onClick (fun _ -> onClick ())
+            Button.content (
+                StackPanel.create [
+                    StackPanel.orientation Orientation.Horizontal
+                    StackPanel.spacing 6.0
+                    StackPanel.children [
+                        TextBlock.create [ TextBlock.text icon; TextBlock.fontSize 12.0; TextBlock.foreground accentBrush ]
+                        TextBlock.create [ TextBlock.text label; TextBlock.fontSize 12.0; TextBlock.foreground Theme.textSecondary ]
+                    ]
+                ])
+        ]
+
+    /// Inline file/task chips for the assistant message of a given turn.
+    let private inlineChips (dispatch: Msg -> unit) (files: SessionFileDto list) (tasks: TaskDto list) (turnId: string) : Avalonia.FuncUI.Types.IView list =
+        if String.IsNullOrEmpty turnId then []
+        else
+            let turnTasks = tasks |> List.filter (fun t -> t.TurnId = turnId)
+            let resultIds =
+                turnTasks
+                |> List.choose (fun t -> if String.IsNullOrEmpty t.ResultFileId then None else Some t.ResultFileId)
+                |> Set.ofList
+            // Generated files that aren't already represented by a task chip.
+            let genFiles =
+                files
+                |> List.filter (fun f -> f.Source = "generated" && f.TurnId = turnId && not (resultIds.Contains f.Id))
+            let taskChips =
+                turnTasks
+                |> List.map (fun t ->
+                    let label, brush = taskStatusInfo t.Status
+                    let onClick () =
+                        if t.Status = AsyncTasks.Status.Completed && not (String.IsNullOrEmpty t.ResultFileId) then
+                            let name =
+                                files |> List.tryFind (fun f -> f.Id = t.ResultFileId)
+                                |> Option.map (fun f -> f.Name) |> Option.defaultValue t.Title
+                            dispatch (DownloadFile(t.ResultFileId, name))
+                        else dispatch ToggleFilesPanel
+                    chip "\u2699" (sprintf "%s — %s" t.Title label) brush onClick)
+            let fileChips =
+                genFiles
+                |> List.map (fun f -> chip "\U0001F4C4" f.Name Theme.accent (fun () -> dispatch (DownloadFile(f.Id, f.Name))))
+            if taskChips.IsEmpty && fileChips.IsEmpty then []
+            else
+                [ WrapPanel.create [
+                      WrapPanel.margin (0.0, 4.0, 0.0, 0.0)
+                      WrapPanel.children (taskChips @ fileChips) ] ]
+
+    /// One file row inside the Files & Tasks panel.
+    let private fileRow (dispatch: Msg -> unit) (f: SessionFileDto) : Avalonia.FuncUI.Types.IView =
+        Border.create [
+            Border.padding (8.0, 6.0)
+            Border.cornerRadius 6.0
+            Border.background Theme.surfaceInset
+            Border.child (
+                Grid.create [
+                    Grid.columnDefinitions "*,Auto"
+                    Grid.children [
+                        StackPanel.create [
+                            Grid.column 0
+                            StackPanel.children [
+                                TextBlock.create [
+                                    TextBlock.text (sprintf "\U0001F4C4 %s" f.Name)
+                                    TextBlock.fontSize 12.0
+                                    TextBlock.foreground Theme.textPrimary
+                                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                ]
+                                TextBlock.create [
+                                    TextBlock.text (sprintf "%s · %s" f.Source (fmtSize f.Size))
+                                    TextBlock.fontSize 10.0
+                                    TextBlock.foreground Theme.textMuted
+                                ]
+                            ]
+                        ]
+                        Button.create [
+                            Grid.column 1
+                            Button.content (Localization.current ()).Download
+                            Button.fontSize 11.0
+                            Button.verticalAlignment VerticalAlignment.Center
+                            Button.onClick (fun _ -> dispatch (DownloadFile(f.Id, f.Name)))
+                        ]
+                    ]
+                ]
+            )
+        ]
+
+    /// The collapsible files panel shown above the conversation.
+    let private filesTasksPanel (dispatch: Msg -> unit) (model: SessionState) : Avalonia.FuncUI.Types.IView =
+        Border.create [
+            Border.borderThickness (0.0, 0.0, 0.0, 1.0)
+            Border.borderBrush Theme.borderSubtle
+            Border.background Theme.surface
+            Border.child (
+                StackPanel.create [
+                    StackPanel.children [
+                        Button.create [
+                            Button.horizontalAlignment HorizontalAlignment.Stretch
+                            Button.horizontalContentAlignment HorizontalAlignment.Left
+                            Button.background Theme.transparent
+                            Button.borderThickness 0.0
+                            Button.padding (12.0, 8.0)
+                            Button.onClick (fun _ -> dispatch ToggleFilesPanel)
+                            Button.content (
+                                TextBlock.create [
+                                    TextBlock.text (
+                                        let t = Localization.current ()
+                                        sprintf "%s  %s  \u00b7  %d %s"
+                                            (if model.FilesPanelOpen then "\u25BE" else "\u25B8")
+                                            t.FilesAndTasks
+                                            model.Files.Length t.FilesWord)
+                                    TextBlock.fontSize 12.0
+                                    TextBlock.foreground Theme.textSecondary
+                                ])
+                        ]
+                        if model.FilesPanelOpen then
+                            ScrollViewer.create [
+                                ScrollViewer.maxHeight 220.0
+                                ScrollViewer.content (
+                                    StackPanel.create [
+                                        StackPanel.margin (12.0, 0.0, 12.0, 10.0)
+                                        StackPanel.spacing 6.0
+                                        StackPanel.children [
+                                            if model.Files.IsEmpty then
+                                                TextBlock.create [
+                                                    TextBlock.text (Localization.current ()).NoFilesOrTasks
+                                                    TextBlock.fontSize 12.0
+                                                    TextBlock.foreground Theme.textMuted
+                                                ]
+                                            for f in model.Files do
+                                                fileRow dispatch f
+                                        ]
+                                    ])
+                            ]
+                    ]
+                ]
+            )
+        ]
+
     let view (dispatch: Msg -> unit) (model: SessionState) : Avalonia.FuncUI.Types.IView =
         let canSend =
             model.Chat = Idle
@@ -390,12 +635,18 @@ module SessionView =
 
         let mainContent : Avalonia.FuncUI.Types.IView =
           Grid.create [
-            Grid.rowDefinitions "*,Auto"
+            Grid.rowDefinitions "Auto,*,Auto"
             Grid.children [
+                // Collapsible "Files & Tasks" panel at the top.
+                Grid.create [
+                    Grid.row 0
+                    Grid.children [ filesTasksPanel dispatch model ]
+                ]
+
                 // Composer (input area) at the bottom — the ChatInput business
                 // component, styled consistently with the rest of the app.
                 Grid.create [
-                    Grid.row 1
+                    Grid.row 2
                     Grid.children [
                         ChatInput.render
                             { Text = model.Input
@@ -415,7 +666,7 @@ module SessionView =
 
                 // Messages area
                 ScrollViewer.create [
-                    Grid.row 0
+                    Grid.row 1
                     ScrollViewer.verticalScrollBarVisibility Primitives.ScrollBarVisibility.Auto
                     ScrollViewer.content (
                         StackPanel.create [
@@ -462,13 +713,14 @@ module SessionView =
                                               Header =
                                                 // The process (what Nao did) reads above the answer.
                                                 if msg.Role = "Nao" && not msg.Steps.IsEmpty then
-                                                    [ ExecutionTrace.render msg.Steps ]
+                                                    [ ExecutionTrace.renderExpandable false msg.Steps ]
                                                 else []
                                               Footer =
                                                 if msg.Role = "Nao" then
                                                     MessageActions.render
                                                         { FeedbackGiven = msg.FeedbackGiven
                                                           OnFeedback = fun sentiment -> dispatch (FeedbackRequested (msg.MessageId, sentiment)) }
+                                                    @ inlineChips dispatch model.Files model.Tasks msg.TurnId
                                                 else [] }
 
                                     // While a turn is processing, show a live in-progress assistant

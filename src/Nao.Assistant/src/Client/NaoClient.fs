@@ -143,6 +143,32 @@ type NaoClient(baseUrl: string) =
         return entries |> Array.toList
     }
 
+    // ─── Per-session files & async tasks (HTTP) ───
+
+    /// List the files stored for a session (uploaded + tool/agent generated). The
+    /// session key ("userId/sessionId") is the trailing catch-all route segment.
+    member _.ListSessionFilesAsync(sessionKey: string) : Task<SessionFileDto list> = task {
+        let! resp = http.GetAsync(sprintf "/api/sessions/files/%s" sessionKey)
+        do! ensureSuccess resp
+        let! items = resp.Content.ReadFromJsonAsync<SessionFileDto[]>(jsonOptions)
+        return (if isNull (box items) then [] else Array.toList items)
+    }
+
+    /// Download a single session file's bytes by id.
+    member _.DownloadSessionFileAsync(sessionKey: string, fileId: string) : Task<byte[]> = task {
+        let! resp = http.GetAsync(sprintf "/api/sessions/file/%s?fileId=%s" sessionKey (Uri.EscapeDataString fileId))
+        do! ensureSuccess resp
+        return! resp.Content.ReadAsByteArrayAsync()
+    }
+
+    /// List the async tasks for a session (with live status/progress).
+    member _.ListSessionTasksAsync(sessionKey: string) : Task<TaskDto list> = task {
+        let! resp = http.GetAsync(sprintf "/api/sessions/tasks/%s" sessionKey)
+        do! ensureSuccess resp
+        let! items = resp.Content.ReadFromJsonAsync<TaskDto[]>(jsonOptions)
+        return (if isNull (box items) then [] else Array.toList items)
+    }
+
     // ─── Feedback / suggestion enhancement loop (HTTP) ───
 
     /// Submit feedback for the most recent turn of a session. Returns the

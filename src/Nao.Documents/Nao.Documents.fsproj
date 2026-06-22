@@ -6,6 +6,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Markdig" Version="0.41.3" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.1" />
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.3.0" />
+    <PackageReference Include="PDFsharp-MigraDoc" Version="6.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="src/Geometry.fs" />
     <Compile Include="src/Resources.fs" />
     <Compile Include="src/Styling.fs" />
@@ -16,6 +23,10 @@
     <Compile Include="src/Registry.fs" />
     <Compile Include="src/PlainText.fs" />
     <Compile Include="src/Markdown.fs" />
+    <Compile Include="src/Html.fs" />
+    <Compile Include="src/Pdf.fs" />
+    <Compile Include="src/OpenXml.fs" />
+    <Compile Include="src/Formats.fs" />
   </ItemGroup>
 
 </Project>

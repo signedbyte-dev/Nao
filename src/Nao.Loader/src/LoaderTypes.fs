@@ -27,6 +27,9 @@ type AgentDef =
       Options: CompletionOptions
       /// Maximum orchestration rounds before forcing a response
       MaxRounds: int
+      /// When true, selecting this agent runs the turn as a background task (a spawned
+      /// sub-session conversation) rather than inline; the turn returns a task token.
+      IsAsync: bool
       /// Where this agent definition came from (populated by the loading source).
       Provenance: ToolProvenance option }
 

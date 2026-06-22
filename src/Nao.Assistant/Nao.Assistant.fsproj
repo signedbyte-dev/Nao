@@ -8,6 +8,9 @@
   <ItemGroup>
     <Compile Include="src/Domain/Contracts.fs" />
     <Compile Include="src/Domain/AppSettings.fs" />
+    <Compile Include="src/Domain/ProviderCatalog.fs" />
+    <Compile Include="src/Domain/SessionFiles.fs" />
+    <Compile Include="src/Domain/AsyncTasks.fs" />
     <Compile Include="src/Server/AssistantOrchestrator.fs" />
     <Compile Include="src/Server/ProviderHealth.fs" />
     <Compile Include="src/Server/AssistantTools.fs" />
@@ -43,6 +46,7 @@
     <ProjectReference Include="..\Nao.Providers\Nao.Providers.fsproj" />
     <ProjectReference Include="..\Nao.Persistence\Nao.Persistence.fsproj" />
     <ProjectReference Include="..\Nao.Feedback\Nao.Feedback.fsproj" />
+    <ProjectReference Include="..\Nao.Events\Nao.Events.fsproj" />
     <ProjectReference Include="..\Nao.Runtime.Orleans\Nao.Runtime.Orleans.fsproj" />
     <ProjectReference Include="..\Nao.Runtime.Orleans.Codegen\Nao.Runtime.Orleans.Codegen.csproj" />
   </ItemGroup>

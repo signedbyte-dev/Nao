@@ -6,6 +6,7 @@ open Microsoft.VisualStudio.TestTools.UnitTesting
 open Nao.Agents
 open Nao.Core
 open Nao.Loader
+open Nao.Runtime.Orleans
 open Nao.Runtime.Orleans.Grains
 
 /// A minimal LLM provider for testing — echoes input
@@ -34,6 +35,7 @@ module TestWorkspace =
           SubAgents = []
           Options = CompletionOptions.Default
           MaxRounds = 1
+          IsAsync = false
           Provenance = None }
 
     let toolDef name =
@@ -194,3 +196,79 @@ type WorkspaceResolutionTests() =
         Assert.IsTrue(found.IsSome)
         let result = found.Value.Execute("World").Result
         Assert.AreEqual("Hello World", result)
+
+[<TestClass>]
+type FileConversationStoreLayoutTests() =
+
+    let newRoot () =
+        let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "nao-conv-" + System.Guid.NewGuid().ToString("N"))
+        System.IO.Directory.CreateDirectory(dir) |> ignore
+        dir
+
+    let cleanup (dir: string) =
+        if System.IO.Directory.Exists dir then System.IO.Directory.Delete(dir, true)
+
+    let sampleMessage role content : Nao.Runtime.Orleans.PersistedMessage =
+        { Role = role
+          Content = content
+          Timestamp = System.DateTimeOffset.UtcNow
+          TurnId = ""
+          Steps = [||]
+          Attachments = [||] }
+
+    [<TestMethod>]
+    member _.AppendAsync_WritesUnderSessionsKeyConversationsFolder() =
+        let root = newRoot ()
+        try
+            let store = Nao.Runtime.Orleans.FileConversationStore(root) :> IConversationStore
+            store.AppendAsync "dev/f5a15b5b" "default" [| sampleMessage "user" "hi" |] |> fun t -> t.Wait()
+            // The data nests at <root>/<sanitized key>/conversations/, sharing the parent
+            // with the session's files/observability/feedback folders.
+            let convDir = System.IO.Path.Combine(root, "dev_f5a15b5b", "conversations")
+            Assert.IsTrue(System.IO.Directory.Exists convDir, "conversations subfolder should exist")
+            Assert.IsTrue(System.IO.File.Exists(System.IO.Path.Combine(convDir, "default.jsonl")))
+            Assert.IsTrue(System.IO.File.Exists(System.IO.Path.Combine(convDir, "default.meta.json")))
+        finally
+            cleanup root
+
+    [<TestMethod>]
+    member _.RoundTrip_LoadReturnsAppendedMessages() =
+        let root = newRoot ()
+        try
+            let store = Nao.Runtime.Orleans.FileConversationStore(root) :> IConversationStore
+            store.AppendAsync "dev/abc" "default" [| sampleMessage "user" "one" |] |> fun t -> t.Wait()
+            store.AppendAsync "dev/abc" "default" [| sampleMessage "assistant" "two" |] |> fun t -> t.Wait()
+            let loaded = (store.LoadAsync "dev/abc" "default").Result
+            Assert.AreEqual(2, loaded.Length)
+            Assert.AreEqual("one", loaded.[0].Content)
+            Assert.AreEqual("two", loaded.[1].Content)
+        finally
+            cleanup root
+
+    [<TestMethod>]
+    member _.ListSessions_ReturnsOnlyConversationBearingSessions() =
+        let root = newRoot ()
+        try
+            let store = Nao.Runtime.Orleans.FileConversationStore(root) :> IConversationStore
+            store.AppendAsync "dev/s1" "default" [| sampleMessage "user" "hi" |] |> fun t -> t.Wait()
+            // A session folder that only holds files (no conversations) must not be listed.
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(root, "dev_s2", "files")) |> ignore
+            let sessions = (store.ListSessionsAsync()).Result
+            Assert.AreEqual(1, sessions.Length)
+            Assert.AreEqual("dev_s1", sessions.[0])
+        finally
+            cleanup root
+
+    [<TestMethod>]
+    member _.DeleteSession_RemovesWholeSessionFolder() =
+        let root = newRoot ()
+        try
+            let store = Nao.Runtime.Orleans.FileConversationStore(root) :> IConversationStore
+            store.AppendAsync "dev/s1" "default" [| sampleMessage "user" "hi" |] |> fun t -> t.Wait()
+            let sessionRoot = System.IO.Path.Combine(root, "dev_s1")
+            // Sibling per-session data should be deleted alongside conversations.
+            System.IO.Directory.CreateDirectory(System.IO.Path.Combine(sessionRoot, "files")) |> ignore
+            store.DeleteSessionAsync "dev/s1" |> fun t -> t.Wait()
+            Assert.IsFalse(System.IO.Directory.Exists sessionRoot)
+        finally
+            cleanup root

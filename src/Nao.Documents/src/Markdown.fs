@@ -115,87 +115,142 @@ module Markdown =
                 use w = new StreamWriter(output, UTF8Encoding(false), 1024, leaveOpen = true)
                 w.Write(sb.ToString().TrimEnd() + "\n")
 
-    // --- Reader: Markdown -> Document (line-based subset) -------------------------
+    // --- Reader: Markdown -> Document (via Markdig) -------------------------------
 
-    /// Reads a Markdown subset (headings, fenced code, lists, quotes, rules,
-    /// paragraphs) into a fluid `Document`. Inline emphasis is preserved verbatim as
-    /// text; richer inline parsing can be layered on later without changing the model.
+    /// Maps the Markdig CommonMark AST onto the unified document model. Kept in a
+    /// private sub-module so the Markdig type abbreviations don't clash with the
+    /// model's own `Inline` / `Block` / `Table` types.
+    module private MarkdigMap =
+
+        type MHeading = Markdig.Syntax.HeadingBlock
+        type MPara = Markdig.Syntax.ParagraphBlock
+        type MList = Markdig.Syntax.ListBlock
+        type MListItem = Markdig.Syntax.ListItemBlock
+        type MQuote = Markdig.Syntax.QuoteBlock
+        type MFenced = Markdig.Syntax.FencedCodeBlock
+        type MCode = Markdig.Syntax.CodeBlock
+        type MThematic = Markdig.Syntax.ThematicBreakBlock
+        type MHtmlBlock = Markdig.Syntax.HtmlBlock
+        type MLeaf = Markdig.Syntax.LeafBlock
+        type MContainerBlock = Markdig.Syntax.ContainerBlock
+        type MTable = Markdig.Extensions.Tables.Table
+        type MRow = Markdig.Extensions.Tables.TableRow
+        type MCell = Markdig.Extensions.Tables.TableCell
+        type MLiteral = Markdig.Syntax.Inlines.LiteralInline
+        type MCodeInline = Markdig.Syntax.Inlines.CodeInline
+        type MLineBreak = Markdig.Syntax.Inlines.LineBreakInline
+        type MEmphasis = Markdig.Syntax.Inlines.EmphasisInline
+        type MLink = Markdig.Syntax.Inlines.LinkInline
+        type MAutolink = Markdig.Syntax.Inlines.AutolinkInline
+        type MHtmlInline = Markdig.Syntax.Inlines.HtmlInline
+        type MContainerInline = Markdig.Syntax.Inlines.ContainerInline
+
+        let pipeline =
+            let b = Markdig.MarkdownPipelineBuilder()
+            Markdig.MarkdownExtensions.UseAdvancedExtensions(b).Build()
+
+        /// Join the raw text lines of a leaf block (code / raw html) into one string.
+        let leafText (lb: MLeaf) : string =
+            let lines = lb.Lines
+            let sb = StringBuilder()
+            for i in 0 .. lines.Count - 1 do
+                if i > 0 then sb.Append('\n') |> ignore
+                sb.Append(lines.Lines.[i].Slice.ToString()) |> ignore
+            sb.ToString()
+
+        let rec mapInline (style: TextStyle) (inl: Markdig.Syntax.Inlines.Inline) : Inline list =
+            match inl with
+            | :? MLiteral as x -> [ Run(x.Content.ToString(), style) ]
+            | :? MCodeInline as x -> [ InlineCode x.Content ]
+            | :? MLineBreak -> [ LineBreak ]
+            | :? MAutolink as x -> [ Link([ Run(x.Url, style) ], x.Url) ]
+            | :? MHtmlInline as x -> [ InlineRaw("html", x.Tag) ]
+            | :? MLink as x ->
+                let url = if isNull x.Url then "" else x.Url
+                let children =
+                    x |> Seq.cast<Markdig.Syntax.Inlines.Inline> |> Seq.collect (mapInline style) |> List.ofSeq
+                if x.IsImage then
+                    let alt = InlineText.ofInlines children
+                    [ InlineImage(ResourceId url, (if String.IsNullOrEmpty alt then None else Some alt), None) ]
+                else [ Link(children, url) ]
+            | :? MEmphasis as x ->
+                let style2 =
+                    match x.DelimiterChar, x.DelimiterCount with
+                    | '~', _ -> { style with Decorations = LineThrough :: style.Decorations }
+                    | _, n when n >= 2 -> { style with Weight = Some Bold }
+                    | _ -> { style with Style = Some Italic }
+                x |> Seq.cast<Markdig.Syntax.Inlines.Inline> |> Seq.collect (mapInline style2) |> List.ofSeq
+            | :? MContainerInline as x ->
+                x |> Seq.cast<Markdig.Syntax.Inlines.Inline> |> Seq.collect (mapInline style) |> List.ofSeq
+            | _ -> []
+
+        let inlinesOf (c: MContainerInline) : Inline list =
+            if isNull (box c) then []
+            else c |> Seq.cast<Markdig.Syntax.Inlines.Inline> |> Seq.collect (mapInline TextStyle.Default) |> List.ofSeq
+
+        let rec mapBlock (b: Markdig.Syntax.Block) : Block list =
+            match b with
+            | :? MHeading as h -> [ Heading(h.Level, inlinesOf h.Inline) ]
+            | :? MTable as t -> [ mapTable t ]
+            | :? MList as l -> [ mapList l ]
+            | :? MQuote as q ->
+                [ Quote(q |> Seq.cast<Markdig.Syntax.Block> |> Seq.collect mapBlock |> List.ofSeq) ]
+            | :? MFenced as f ->
+                let lang = if String.IsNullOrWhiteSpace f.Info then None else Some f.Info
+                [ CodeBlock(lang, (leafText f).TrimEnd('\n')) ]
+            | :? MCode as c -> [ CodeBlock(None, (leafText c).TrimEnd('\n')) ]
+            | :? MThematic -> [ ThematicBreak ]
+            | :? MHtmlBlock as h -> [ BlockRaw("html", (leafText h).TrimEnd('\n')) ]
+            | :? MPara as p -> [ Paragraph(inlinesOf p.Inline, None) ]
+            | :? MContainerBlock as cont ->
+                cont |> Seq.cast<Markdig.Syntax.Block> |> Seq.collect mapBlock |> List.ofSeq
+            | _ -> []
+
+        and mapList (l: MList) : Block =
+            let items =
+                l |> Seq.cast<MListItem>
+                |> Seq.map (fun item ->
+                    { Content = item |> Seq.cast<Markdig.Syntax.Block> |> Seq.collect mapBlock |> List.ofSeq })
+                |> List.ofSeq
+            let start =
+                if l.IsOrdered then
+                    match Int32.TryParse l.OrderedStart with
+                    | true, n -> Some n
+                    | _ -> None
+                else None
+            ListBlock { Ordered = l.IsOrdered; Start = start; Items = items }
+
+        and mapTable (t: MTable) : Block =
+            let mapRow (r: MRow) : TableRow =
+                { Cells =
+                    r |> Seq.cast<MCell>
+                    |> Seq.map (fun c ->
+                        { Content = c |> Seq.cast<Markdig.Syntax.Block> |> Seq.collect mapBlock |> List.ofSeq
+                          ColSpan = max 1 c.ColumnSpan
+                          RowSpan = max 1 c.RowSpan
+                          Style = None })
+                    |> List.ofSeq }
+            let rows = t |> Seq.cast<MRow> |> List.ofSeq
+            let header = rows |> List.tryFind (fun r -> r.IsHeader) |> Option.map mapRow
+            let body = rows |> List.filter (fun r -> not r.IsHeader) |> List.map mapRow
+            let colCount =
+                match header with
+                | Some h -> h.Cells.Length
+                | None -> body |> List.tryHead |> Option.map (fun r -> r.Cells.Length) |> Option.defaultValue 0
+            Table { Columns = List.replicate colCount { Width = None; Align = None }; Header = header; Rows = body; Style = None }
+
+    /// Parses Markdown into a fluid `Document` with the Markdig CommonMark parser
+    /// (advanced extensions on: pipe tables, strikethrough, autolinks, ...).
     type Reader() =
         interface IDocumentReader with
             member _.MediaTypes = [ MediaType ]
             member _.Read(input, _ctx) =
                 use r = new StreamReader(input, Encoding.UTF8, true, 1024, leaveOpen = true)
-                let text = r.ReadToEnd().Replace("\r\n", "\n")
-                let lines = text.Split('\n')
-                let blocks = ResizeArray<Block>()
-                let mutable i = 0
-                let paragraphBuffer = ResizeArray<string>()
-                let listBuffer = ResizeArray<string>()
-                let mutable listOrdered = false
-
-                let flushParagraph () =
-                    if paragraphBuffer.Count > 0 then
-                        let inlines =
-                            paragraphBuffer
-                            |> Seq.mapi (fun idx line ->
-                                if idx = 0 then [ Run(line, TextStyle.Default) ]
-                                else [ LineBreak; Run(line, TextStyle.Default) ])
-                            |> Seq.toList
-                            |> List.concat
-                        blocks.Add(Paragraph(inlines, None))
-                        paragraphBuffer.Clear()
-
-                let flushList () =
-                    if listBuffer.Count > 0 then
-                        let items = listBuffer |> Seq.map (fun s -> { Content = [ Doc.para s ] }) |> Seq.toList
-                        blocks.Add(ListBlock { Ordered = listOrdered; Start = None; Items = items })
-                        listBuffer.Clear()
-
-                let flushAll () = flushParagraph (); flushList ()
-
-                while i < lines.Length do
-                    let line = lines.[i]
-                    let trimmed = line.TrimStart()
-                    if trimmed.StartsWith("```") then
-                        flushAll ()
-                        let lang = trimmed.Substring(3).Trim()
-                        let codeLines = ResizeArray<string>()
-                        i <- i + 1
-                        while i < lines.Length && not (lines.[i].TrimStart().StartsWith("```")) do
-                            codeLines.Add(lines.[i])
-                            i <- i + 1
-                        let langOpt = if lang = "" then None else Some lang
-                        blocks.Add(CodeBlock(langOpt, String.Join("\n", codeLines)))
-                    elif trimmed.StartsWith("#") then
-                        flushAll ()
-                        let level = trimmed.Length - trimmed.TrimStart('#').Length
-                        let content = trimmed.TrimStart('#').Trim()
-                        blocks.Add(Heading(level, [ Run(content, TextStyle.Default) ]))
-                    elif trimmed = "---" || trimmed = "***" || trimmed = "___" then
-                        flushAll ()
-                        blocks.Add(ThematicBreak)
-                    elif trimmed.StartsWith("> ") then
-                        flushAll ()
-                        blocks.Add(Quote [ Doc.para (trimmed.Substring(2)) ])
-                    elif trimmed.StartsWith("- ") || trimmed.StartsWith("* ") then
-                        flushParagraph ()
-                        if listOrdered then flushList ()
-                        listOrdered <- false
-                        listBuffer.Add(trimmed.Substring(2))
-                    elif trimmed.Length > 2 && Char.IsDigit trimmed.[0] && trimmed.Contains(". ") then
-                        flushParagraph ()
-                        if not listOrdered then flushList ()
-                        listOrdered <- true
-                        listBuffer.Add(trimmed.Substring(trimmed.IndexOf(". ") + 2))
-                    elif trimmed = "" then
-                        flushAll ()
-                    else
-                        flushList ()
-                        paragraphBuffer.Add(line)
-                    i <- i + 1
-
-                flushAll ()
-                Document.OfBlocks (List.ofSeq blocks)
+                let text = r.ReadToEnd()
+                let md = Markdig.Markdown.Parse(text, MarkdigMap.pipeline)
+                let blocks =
+                    md |> Seq.cast<Markdig.Syntax.Block> |> Seq.collect MarkdigMap.mapBlock |> List.ofSeq
+                Document.OfBlocks blocks
 
     /// A `ConverterRegistry` preconfigured with the built-in text formats
     /// (markdown + plain text), ready for A → unified → B conversions.

@@ -103,7 +103,7 @@ module ChatInput =
                             Grid.column 1
                             StackPanel.children [
                                 Components.button
-                                    "Send"
+                                    (Localization.current ()).Send
                                     (props.CanSend && not (String.IsNullOrWhiteSpace props.Text))
                                     props.OnSend
                             ]

@@ -276,7 +276,7 @@ module BuilderView =
                         StackPanel.spacing 8.0
                         StackPanel.children [
                             TextBlock.create [
-                                TextBlock.text (sprintf "Generated %s: %s" d.Kind d.Name)
+                                TextBlock.text (sprintf "%s %s: %s" (Localization.current ()).GeneratedLabel d.Kind d.Name)
                                 TextBlock.fontWeight FontWeight.SemiBold
                                 TextBlock.foreground Brushes.White
                             ]
@@ -293,12 +293,12 @@ module BuilderView =
                                 StackPanel.spacing 8.0
                                 StackPanel.children [
                                     Button.create [
-                                        Button.content "Save"
+                                        Button.content (Localization.current ()).Save
                                         Button.isEnabled (not model.Busy)
                                         Button.onClick (fun _ -> dispatch SaveDraft)
                                     ]
                                     Button.create [
-                                        Button.content "Discard"
+                                        Button.content (Localization.current ()).Discard
                                         Button.background Brushes.Transparent
                                         Button.onClick (fun _ -> dispatch DiscardDraft)
                                     ]
@@ -340,7 +340,7 @@ module BuilderView =
                             TextBox.onTextChanged (fun t -> dispatch (onChange t))
                         ]
                         Button.create [
-                            Button.content (if model.Busy then "Working..." else "Generate")
+                            Button.content (if model.Busy then (Localization.current ()).Working else (Localization.current ()).Generate)
                             Button.isEnabled (not model.Busy)
                             Button.onClick (fun _ -> dispatch onGenerate)
                         ]
@@ -379,7 +379,7 @@ module BuilderView =
                     DockPanel.children [
                         Button.create [
                             Button.dock Dock.Right
-                            Button.content "Delete"
+                            Button.content (Localization.current ()).Delete
                             Button.fontSize 11.0
                             Button.background Theme.transparent
                             Button.foreground Theme.danger
@@ -406,6 +406,7 @@ module BuilderView =
 
     /// The intro/upload panel at the top of the Knowledge tab.
     let private knowledgePanel (dispatch: Msg -> unit) : Avalonia.FuncUI.Types.IView =
+        let t = Localization.current ()
         Border.create [
             Border.padding (12.0, 10.0)
             Border.cornerRadius 12.0
@@ -415,18 +416,18 @@ module BuilderView =
                     StackPanel.spacing 8.0
                     StackPanel.children [
                         TextBlock.create [
-                            TextBlock.text "Knowledge base"
+                            TextBlock.text t.KnowledgeBase
                             TextBlock.fontWeight FontWeight.SemiBold
                             TextBlock.foreground Brushes.White
                         ]
                         TextBlock.create [
-                            TextBlock.text "Upload text files; their content is chunked, embedded and used to augment answers across all sessions."
+                            TextBlock.text t.KnowledgeBaseIntro
                             TextBlock.fontSize 12.0
                             TextBlock.textWrapping TextWrapping.Wrap
                             TextBlock.foreground subtle
                         ]
                         Button.create [
-                            Button.content "\U0001F4C1 Upload file"
+                            Button.content (sprintf "\U0001F4C1 %s" t.UploadFile)
                             Button.onClick (fun _ -> dispatch UploadKnowledgePressed)
                         ]
                     ]
@@ -434,21 +435,23 @@ module BuilderView =
         ]
 
     let private toolsTab (dispatch: Msg -> unit) (model: BuilderState) : Avalonia.FuncUI.Types.IView list =
+        let t = Localization.current ()
         [ generatePanel
-            "Generate a tool from a requirement"
-            "e.g. Fetch the current weather for a city using a public API"
+            t.GenerateToolTitle
+            t.GenerateToolHint
             model.ToolReq ToolReqChanged GenerateTool dispatch model ]
         @ draftEditor dispatch model
-        @ [ sectionLabel "Available tools" ]
+        @ [ sectionLabel t.AvailableTools ]
         @ (model.Tools |> List.map definitionRow)
 
     let private agentsTab (dispatch: Msg -> unit) (model: BuilderState) : Avalonia.FuncUI.Types.IView list =
+        let t = Localization.current ()
         [ generatePanel
-            "Generate an agent (workflow) from a requirement"
-            "e.g. A research assistant that searches files and summarizes findings"
+            t.GenerateAgentTitle
+            t.GenerateAgentHint
             model.AgentReq AgentReqChanged GenerateAgent dispatch model ]
         @ draftEditor dispatch model
-        @ [ sectionLabel "Available agents" ]
+        @ [ sectionLabel t.AvailableAgents ]
         @ (model.Agents |> List.map definitionRow)
 
     let private knowledgeTab (dispatch: Msg -> unit) (model: BuilderState) : Avalonia.FuncUI.Types.IView list =

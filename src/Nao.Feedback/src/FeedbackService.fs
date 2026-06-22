@@ -28,6 +28,12 @@ type FeedbackService
     /// Persist a completed turn so feedback can later be analysed against it.
     member _.RecordTurnAsync(turn: TurnRecord) : Task = turnStore.SaveAsync turn
 
+    /// Persist a raw feedback entry WITHOUT analysing it into annotations. Used by the
+    /// event-storage consumer to record implicitly-captured feedback (whose detection
+    /// happens at the producer); explicit feedback that should mutate behaviour goes
+    /// through SubmitFeedbackAsync instead.
+    member _.SaveFeedbackAsync(feedback: Feedback) : Task = feedbackStore.SaveAsync feedback
+
     /// Record user feedback, analyse it into annotations, persist them as ACTIVE (so the
     /// adjustment takes effect immediately and on every subsequent restart), and return
     /// the proposals that were applied.

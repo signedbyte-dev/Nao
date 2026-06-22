@@ -25,6 +25,7 @@
     <Compile Include="src/VerificationTests.fs" />
     <Compile Include="src/GovernanceTests.fs" />
     <Compile Include="src/EtclovgHarnessTests.fs" />
+    <Compile Include="src/DelegationHookTests.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nao.Agents\Nao.Agents.fsproj" />

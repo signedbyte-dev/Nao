@@ -10,10 +10,14 @@ open System.Threading.Tasks
 /// Layout:
 ///   {baseDir}/
 ///     {sessionId}/
-///       _meta.json              — session-level metadata
-///       {conversationName}.jsonl — one JSON object per line (append-friendly)
+///       conversations/
+///         {conversationName}.jsonl — one JSON object per line (append-friendly)
+///         {conversationName}.meta.json — conversation-level metadata
 ///
-/// Session IDs containing '/' are flattened to '_' for filesystem safety.
+/// {baseDir} is the shared `sessions/` root, so each session's conversations nest
+/// alongside its files, observability and feedback under sessions/<sessionId>/.
+/// Session IDs containing '/' are flattened to '_' for filesystem safety; the mapping
+/// matches Nao.Assistant's SessionFiles so all four data folders share one parent.
 type FileConversationStore(baseDir: string) =
 
     let jsonOptions =
@@ -22,10 +26,10 @@ type FileConversationStore(baseDir: string) =
         opts
 
     let sanitize (id: string) =
-        id.Replace('/', '_').Replace('\\', '_').Replace(':', '_')
+        id |> String.map (fun c -> if Char.IsLetterOrDigit c || c = '-' || c = '_' then c else '_')
 
     let sessionDir (sessionId: string) =
-        Path.Combine(baseDir, sanitize sessionId)
+        Path.Combine(baseDir, sanitize sessionId, "conversations")
 
     let conversationFile (sessionId: string) (conversationName: string) =
         Path.Combine(sessionDir sessionId, sprintf "%s.jsonl" (sanitize conversationName))
@@ -136,6 +140,9 @@ type FileConversationStore(baseDir: string) =
                 if Directory.Exists baseDir then
                     return
                         Directory.GetDirectories(baseDir)
+                        // Only sessions that actually hold a conversation; a folder may exist
+                        // for files/observability before a first message is ever sent.
+                        |> Array.filter (fun d -> Directory.Exists(Path.Combine(d, "conversations")))
                         |> Array.map Path.GetFileName
                 else
                     return Array.empty
@@ -151,7 +158,9 @@ type FileConversationStore(baseDir: string) =
 
         member _.DeleteSessionAsync(sessionId: string) =
             task {
-                let dir = sessionDir sessionId
+                // Remove the entire session folder (conversations, files, observability and
+                // feedback) so deleting a session leaves nothing behind under sessions/<key>/.
+                let dir = Path.Combine(baseDir, sanitize sessionId)
                 if Directory.Exists dir then
                     Directory.Delete(dir, recursive = true)
             }

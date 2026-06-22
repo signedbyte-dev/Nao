@@ -30,16 +30,67 @@ open Nao.Runtime.Orleans.Grains
 
 module AssistantTools =
 
-    let private workDir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nao-workspace")
+    /// Shared fallback workspace used only when no session turn is active (e.g. tests).
+    /// Lives UNDER the single app data directory (`.nao-data`, override with NAO_DATA_DIR)
+    /// so there is only one base folder — the legacy `~/.nao-workspace` is no longer used.
+    let private globalWorkDir =
+        let dataDir =
+            match Environment.GetEnvironmentVariable("NAO_DATA_DIR") with
+            | path when not (String.IsNullOrWhiteSpace path) -> path
+            | _ -> Path.Combine(Environment.CurrentDirectory, ".nao-data")
+        Path.Combine(dataDir, "workspace")
 
+    /// The directory all file tools operate in. File storage is unified on the current
+    /// session's files folder — the same place uploads and generated files live and the UI
+    /// lists — so a user's attachments and a tool's output share one location. Falls back to
+    /// the shared workspace when there is no active session. The directory is ensured.
+    let private currentWorkDir () =
+        let dir =
+            match SessionExecution.current () with
+            | Some scope -> (SessionFiles.forKey scope.FilesKey).FilesDir
+            | None -> globalWorkDir
+        Directory.CreateDirectory dir |> ignore
+        dir
+
+    /// Resolve a user-supplied relative path inside the current working directory,
+    /// preventing traversal outside it via "..".
     let private resolvePath (input: string) =
-        let name = input.Trim().Replace("\\", "/").TrimStart('/')
-        Path.GetFullPath(Path.Combine(workDir, name))
+        let root = currentWorkDir ()
+        let cleaned = input.Trim().Replace("\\", "/").TrimStart('/')
+        let full = Path.GetFullPath(Path.Combine(root, cleaned))
+        let rootFull = Path.GetFullPath(root)
+        if full = rootFull || full.StartsWith(rootFull + string Path.DirectorySeparatorChar, StringComparison.Ordinal)
+        then full
+        else Path.GetFullPath(Path.Combine(root, Path.GetFileName cleaned))
+
+    // ─── Conversation-budget guards ───
+    // Large file content must stay on disk, not flood the LLM conversation. read_file
+    // returns a bounded window (page through with offset/length); write_file rejects a
+    // single oversized blob (build large files with several append calls); and every
+    // tool result is clamped before it is handed back to the model.
+
+    /// Max characters any single tool result may contribute to the conversation.
+    let private maxToolResultChars = 24000
+    /// Max characters read_file returns in one call (a page of a large file).
+    let private maxReadWindowChars = 20000
+    /// Max characters write_file accepts in a single call (use append for more).
+    let private maxWriteChars = 200000
+
+    /// Clamp text to a budget, appending a note that records the original size.
+    let private clampText (max: int) (s: string) =
+        if not (isNull s) && s.Length > max then
+            s.Substring(0, max) + sprintf "\n…(truncated to %d of %d chars)" max s.Length
+        else s
+
+    /// Hook into the per-workspace knowledge base, set by the embedded server at startup.
+    /// Given a query and a result count, returns up to that many (fileName, passage) matches
+    /// from files the user explicitly uploaded. The knowledge base is NEVER injected into the
+    /// conversation automatically — the agent must call the search_knowledge tool to consult it.
+    let mutable knowledgeSearch: (string -> int -> (string * string) list) option = None
 
     let ensureWorkDir () =
-        Directory.CreateDirectory(workDir) |> ignore
-        workDir
+        Directory.CreateDirectory(globalWorkDir) |> ignore
+        globalWorkDir
 
     let createFolder: Tool =
         Tool.Create("create_folder", "Create a new folder. Input: relative folder path.",
@@ -50,33 +101,75 @@ module AssistantTools =
             })
 
     let writeFile: Tool =
-        Tool.Create("write_file", "Write content to a file. Input format: 'relative/path|content'.",
+        Tool.Create("write_file",
+            "Write text to a workspace file. Input: 'relative/path|content' (overwrites), or "
+            + "'relative/path|append|content' to append. Content is written straight to disk; for very "
+            + "large files, build them up with several append calls instead of one huge write.",
             fun input -> task {
                 let parts = input.Split('|', 2)
-                if parts.Length < 2 then return """{"error":"Expected 'path|content'"}"""
+                if parts.Length < 2 then return """{"error":"Expected 'path|content' or 'path|append|content'"}"""
                 else
                     let path = resolvePath parts.[0]
-                    let dir = Path.GetDirectoryName(path)
-                    if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
-                    do! File.WriteAllTextAsync(path, parts.[1])
-                    return sprintf """{"written":"%s","bytes":%d}""" (path.Replace("\\", "/")) parts.[1].Length
+                    let rest = parts.[1]
+                    let isAppend = rest.StartsWith("append|")
+                    let content = if isAppend then rest.Substring("append|".Length) else rest
+                    if content.Length > maxWriteChars then
+                        return sprintf """{"error":"Content too large (%d chars); write in smaller pieces using 'path|append|...'.","maxChars":%d}""" content.Length maxWriteChars
+                    else
+                        let dir = Path.GetDirectoryName(path)
+                        if not (Directory.Exists(dir)) then Directory.CreateDirectory(dir) |> ignore
+                        if isAppend then do! File.AppendAllTextAsync(path, content)
+                        else do! File.WriteAllTextAsync(path, content)
+                        let total = (FileInfo path).Length
+                        return sprintf """{"written":"%s","mode":"%s","bytes":%d,"totalBytes":%d}"""
+                                (path.Replace("\\", "/")) (if isAppend then "append" else "overwrite") content.Length total
             })
 
     let readFile: Tool =
-        Tool.Create("read_file", "Read content from a file. Input: relative file path.",
+        Tool.Create("read_file",
+            "Read a text file's contents. Input: 'name-or-path' (returns up to ~20k chars), or "
+            + "'name-or-path|offset' / 'name-or-path|offset|length' to read a character window so you can "
+            + "page through large files. This is also how you read a file the user attached: pass the "
+            + "attachment's file name. Attachments are NOT included in the conversation automatically — call "
+            + "this tool to read one only when you actually need its contents. Oversized files are truncated "
+            + "with a note showing the total size and the offset to continue from.",
             fun input -> task {
-                let path = resolvePath input
-                if File.Exists(path) then
-                    let! content = File.ReadAllTextAsync(path)
-                    return content
+                let parts = input.Split('|')
+                let nameOrPath = parts.[0].Trim()
+                let path = resolvePath nameOrPath
+                if not (File.Exists path) then
+                    return sprintf """{"error":"File not found: %s"}""" nameOrPath
                 else
-                    return sprintf """{"error":"File not found: %s"}""" input
+                    let content = File.ReadAllText path
+                    let total = content.Length
+                    let offset =
+                        if parts.Length > 1 then
+                            match Int32.TryParse(parts.[1].Trim()) with
+                            | true, n when n >= 0 -> min n total
+                            | _ -> 0
+                        else 0
+                    let window =
+                        if parts.Length > 2 then
+                            match Int32.TryParse(parts.[2].Trim()) with
+                            | true, n when n > 0 -> min n maxReadWindowChars
+                            | _ -> maxReadWindowChars
+                        else maxReadWindowChars
+                    let take = min window (total - offset)
+                    let slice = content.Substring(offset, take)
+                    let nextOffset = offset + take
+                    if nextOffset < total then
+                        return slice + sprintf "\n…(showing chars %d–%d of %d; read '%s|%d' to continue)"
+                                            offset nextOffset total nameOrPath nextOffset
+                    elif offset > 0 then
+                        return slice + sprintf "\n…(showing chars %d–%d of %d; end of file)" offset nextOffset total
+                    else
+                        return slice
             })
 
     let listFolder: Tool =
         Tool.Create("list_folder", "List directory contents. Input: relative path (empty for root).",
             fun input -> task {
-                let path = if String.IsNullOrWhiteSpace(input) then workDir else resolvePath input
+                let path = if String.IsNullOrWhiteSpace(input) then currentWorkDir () else resolvePath input
                 if not (Directory.Exists(path)) then
                     return sprintf """{"error":"Directory not found: %s"}""" input
                 else
@@ -192,7 +285,8 @@ module AssistantTools =
                         match trimmed.IndexOf('|') with
                         | -1 -> trimmed, ""
                         | i -> trimmed.Substring(0, i).Trim(), trimmed.Substring(i + 1).Trim()
-                    let root = if String.IsNullOrWhiteSpace sub then workDir else resolvePath sub
+                    let baseDir = currentWorkDir ()
+                    let root = if String.IsNullOrWhiteSpace sub then baseDir else resolvePath sub
                     if not (Directory.Exists root) then return sprintf """{"error":"Directory not found: %s"}""" sub
                     else
                         let regex = Regex(pattern, RegexOptions.IgnoreCase)
@@ -203,7 +297,7 @@ module AssistantTools =
                                     let lines = File.ReadAllLines(file)
                                     lines |> Array.iteri (fun i line ->
                                         if matches.Count < 200 && regex.IsMatch(line) then
-                                            let rel = Path.GetRelativePath(workDir, file).Replace("\\", "/")
+                                            let rel = Path.GetRelativePath(baseDir, file).Replace("\\", "/")
                                             matches.Add(sprintf "%s:%d: %s" rel (i + 1) (line.Trim())))
                                 with _ -> ()
                         return (if matches.Count = 0 then "(no matches)" else String.Join("\n", matches))
@@ -224,11 +318,12 @@ module AssistantTools =
                             .Replace("\\*", "[^/]*")
                             .Replace("\\?", "[^/]")
                     let regex = Regex("^" + escaped + "$", RegexOptions.IgnoreCase)
-                    if not (Directory.Exists workDir) then return "(workspace empty)"
+                    let baseDir = currentWorkDir ()
+                    if not (Directory.Exists baseDir) then return "(workspace empty)"
                     else
                         let results =
-                            Directory.EnumerateFiles(workDir, "*", SearchOption.AllDirectories)
-                            |> Seq.map (fun f -> Path.GetRelativePath(workDir, f).Replace("\\", "/"))
+                            Directory.EnumerateFiles(baseDir, "*", SearchOption.AllDirectories)
+                            |> Seq.map (fun f -> Path.GetRelativePath(baseDir, f).Replace("\\", "/"))
                             |> Seq.filter regex.IsMatch
                             |> Seq.truncate 500
                             |> List.ofSeq
@@ -241,46 +336,124 @@ module AssistantTools =
     let private mediaTypeForExt (ext: string) =
         match ext.ToLowerInvariant() with
         | ".md" | ".markdown" -> Some Nao.Documents.Markdown.MediaType
-        | ".txt" | ".text" | "" -> Some Nao.Documents.PlainText.MediaType
+        | ".txt" | ".text" -> Some Nao.Documents.PlainText.MediaType
+        | ".html" | ".htm" -> Some Nao.Documents.Html.MediaType
+        | ".pdf" -> Some Nao.Documents.Pdf.MediaType
+        | ".docx" -> Some Nao.Documents.Docx.MediaType
+        | ".xlsx" -> Some Nao.Documents.Xlsx.MediaType
+        | ".pptx" -> Some Nao.Documents.Pptx.MediaType
         | _ -> None
 
-    let private documentRegistry = Nao.Documents.Markdown.defaultRegistry ()
+    /// Map a bare format token — a format NAME ("pdf", "word", "excel") or an extension
+    /// ("pdf", ".pdf") — to its canonical file extension. Lets the converter accept a target
+    /// expressed as a format ("README.md|pdf") rather than a full filename, so a request like
+    /// "convert README.md to pdf" doesn't get mis-saved to a file literally named "pdf".
+    let private canonicalExt (token: string) : string option =
+        match token.Trim().TrimStart('.').ToLowerInvariant() with
+        | "md" | "markdown" -> Some ".md"
+        | "txt" | "text" | "plaintext" | "plain" -> Some ".txt"
+        | "html" | "htm" -> Some ".html"
+        | "pdf" -> Some ".pdf"
+        | "docx" | "word" -> Some ".docx"
+        | "xlsx" | "excel" | "spreadsheet" -> Some ".xlsx"
+        | "pptx" | "powerpoint" | "presentation" | "slides" -> Some ".pptx"
+        | _ -> None
+
+    /// Resolve the target the caller asked for into a concrete output path. If the target
+    /// already carries a supported extension it is used as-is; otherwise the target is treated
+    /// as a format name and the output filename is derived from the SOURCE's base name plus the
+    /// format's canonical extension (e.g. "README.md" + pdf -> "README.pdf").
+    let private resolveTargetName (sourceName: string) (targetToken: string) : string option =
+        let ext = Path.GetExtension targetToken
+        if ext <> "" && (mediaTypeForExt ext).IsSome then Some targetToken
+        else canonicalExt targetToken |> Option.map (fun e -> Path.GetFileNameWithoutExtension sourceName + e)
+
+    let private documentRegistry = Nao.Documents.Formats.fullRegistry ()
 
     let convertDocument: Tool =
         Tool.Create("convert_document",
             "Convert a workspace document from one format to another via the unified document model. "
-            + "Input format: 'source/relative/path|target/relative/path'. Formats are inferred from the "
-            + "file extensions. Supported: .md/.markdown and .txt. Extracted media is saved next to the target.",
+            + "Input format: 'source|target'. The source is a file path/name; the target is either a "
+            + "destination filename (e.g. 'README.pdf') or just the desired format ('pdf', 'docx', 'html', "
+            + "'xlsx', 'pptx', 'md', 'txt') in which case the output is named after the source. Reads "
+            + ".md/.markdown, .txt, .html and .docx; writes those plus .pdf, .xlsx and .pptx.",
             fun input -> task {
                 try
                     let parts = input.Split('|', 2)
                     if parts.Length < 2 then
-                        return """{"error":"Expected 'sourcePath|targetPath'"}"""
+                        return """{"error":"Expected 'source|target' (target is a filename or a format like 'pdf')"}"""
                     else
-                        let sourcePath = resolvePath parts.[0]
-                        let targetPath = resolvePath parts.[1]
+                        let sourceRaw = parts.[0].Trim()
+                        let sourcePath = resolvePath sourceRaw
                         if not (File.Exists sourcePath) then
-                            return sprintf """{"error":"Source not found: %s"}""" (parts.[0].Trim())
+                            return sprintf """{"error":"Source not found: %s"}""" sourceRaw
                         else
-                            let srcMt = mediaTypeForExt (Path.GetExtension sourcePath)
-                            let tgtMt = mediaTypeForExt (Path.GetExtension targetPath)
-                            match srcMt, tgtMt with
-                            | None, _ ->
-                                return sprintf """{"error":"Unsupported source format: %s"}""" (Path.GetExtension sourcePath)
-                            | _, None ->
-                                return sprintf """{"error":"Unsupported target format: %s"}""" (Path.GetExtension targetPath)
-                            | Some src, Some tgt ->
-                                let dir = Path.GetDirectoryName(targetPath)
-                                if not (Directory.Exists dir) then Directory.CreateDirectory(dir) |> ignore
-                                Nao.Documents.Converter.convertFile documentRegistry src tgt sourcePath targetPath
-                                let bytes = (FileInfo targetPath).Length
-                                return sprintf """{"converted":"%s","from":"%s","to":"%s","bytes":%d}"""
-                                        (targetPath.Replace("\\", "/")) src tgt bytes
+                            match resolveTargetName sourceRaw (parts.[1].Trim()) with
+                            | None ->
+                                return sprintf """{"error":"Unsupported target format: %s"}""" (parts.[1].Trim())
+                            | Some targetName ->
+                                let targetPath = resolvePath targetName
+                                let srcMt = mediaTypeForExt (Path.GetExtension sourcePath)
+                                let tgtMt = mediaTypeForExt (Path.GetExtension targetPath)
+                                match srcMt, tgtMt with
+                                | None, _ ->
+                                    return sprintf """{"error":"Unsupported source format: %s"}""" (Path.GetExtension sourcePath)
+                                | _, None ->
+                                    return sprintf """{"error":"Unsupported target format: %s"}""" (Path.GetExtension targetPath)
+                                | Some src, Some tgt ->
+                                    let dir = Path.GetDirectoryName(targetPath)
+                                    if not (Directory.Exists dir) then Directory.CreateDirectory(dir) |> ignore
+                                    Nao.Documents.Converter.convertFile documentRegistry src tgt sourcePath targetPath
+                                    let bytes = (FileInfo targetPath).Length
+                                    return sprintf """{"converted":"%s","from":"%s","to":"%s","bytes":%d}"""
+                                            (targetPath.Replace("\\", "/")) src tgt bytes
                 with ex ->
                     return sprintf """{"error":%s}""" (JsonSerializer.Serialize(ex.Message))
             })
 
-    let allTools = [ createFolder; writeFile; readFile; listFolder; delete; dateTime; calculator
-                     httpRequest; webFetch; searchFiles; findFiles; convertDocument ]
+    /// Search the user's uploaded knowledge base on demand. The base is not loaded into the
+    /// conversation by default; the agent calls this tool (after asking the user) only when it
+    /// genuinely needs information from files the user uploaded.
+    let searchKnowledge: Tool =
+        Tool.Create("search_knowledge",
+            "Search the user's knowledge base — documents the user explicitly uploaded — for passages "
+            + "relevant to a query, returning the top matches as { file, text } snippets. The knowledge "
+            + "base is NOT loaded automatically: only call this when you actually need information from the "
+            + "user's uploaded files, and ASK THE USER FOR PERMISSION before each search. "
+            + "Input: 'query' or 'query|topK' (topK defaults to 4, max 10).",
+            fun input -> task {
+                match knowledgeSearch with
+                | None -> return """{"error":"Knowledge base is not available."}"""
+                | Some search ->
+                    let parts = input.Split('|')
+                    let query = parts.[0].Trim()
+                    if String.IsNullOrWhiteSpace query then
+                        return """{"error":"Expected a search query."}"""
+                    else
+                        let topK =
+                            if parts.Length > 1 then
+                                match Int32.TryParse(parts.[1].Trim()) with
+                                | true, n when n > 0 -> min n 10
+                                | _ -> 4
+                            else 4
+                        let hits = search query topK
+                        if List.isEmpty hits then
+                            return """{"matches":[],"note":"No relevant passages found in the knowledge base."}"""
+                        else
+                            let matches =
+                                hits
+                                |> List.map (fun (f, t) ->
+                                    sprintf """{"file":%s,"text":%s}""" (JsonSerializer.Serialize f) (JsonSerializer.Serialize t))
+                                |> String.concat ","
+                            return sprintf """{"matches":[%s]}""" matches
+            })
+
+    let allTools =
+        [ createFolder; writeFile; readFile; listFolder; delete; dateTime; calculator
+          httpRequest; webFetch; searchFiles; findFiles; searchKnowledge; convertDocument ]
+        // Final safety net: clamp every tool result so no tool (current or future) can
+        // flood the conversation regardless of the file or response size it produces.
+        |> List.map (fun tool ->
+            { tool with Execute = fun input -> task { let! r = tool.Execute input in return clampText maxToolResultChars r } })
 
 

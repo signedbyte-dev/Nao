@@ -13,10 +13,13 @@
   <ItemGroup>
     <Compile Include="src/MSTestSettings.fs" />
     <Compile Include="src/SessionTests.fs" />
+    <Compile Include="src/PublishingConversationStoreTests.fs" />
+    <Compile Include="src/ConversationContextRenderTests.fs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nao.Runtime.Orleans\Nao.Runtime.Orleans.fsproj" />
     <ProjectReference Include="..\..\src\Nao.Loader\Nao.Loader.fsproj" />
+    <ProjectReference Include="..\..\src\Nao.Events\Nao.Events.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

@@ -12,6 +12,7 @@
     <Compile Include="src/Configs/VllmConfig.fs" />
     <Compile Include="src/Configs/LlamaCppConfig.fs" />
     <Compile Include="src/OllamaProvider.fs" />
+    <Compile Include="src/OpenAICompatibleProvider.fs" />
     <Compile Include="src/ProviderType.fs" />
     <Compile Include="src/ProviderFactory.fs" />
   </ItemGroup>

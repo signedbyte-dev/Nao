@@ -25,6 +25,7 @@ open Nao.Loader
 open Nao.Providers
 open Nao.Persistence
 open Nao.Feedback
+open Nao.Events
 open Nao.Runtime.Orleans
 open Nao.Runtime.Orleans.Grains
 
@@ -79,10 +80,6 @@ module EmbeddedServer =
         do! socket.SendAsync(ArraySegment(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
     }
 
-    /// Augments a user message with relevant workspace knowledge before it reaches the
-    /// agent. Set in `start` to use the knowledge store; identity by default.
-    let mutable knowledgeAugment: string -> Task<string> = fun input -> Task.FromResult input
-
     let private handleWsMessage (socket: WebSocket) (grainFactory: IGrainFactory) (sessionId: string) (msg: WsRequest) = task {
         let session = grainFactory.GetGrain<ISessionGrain>(sessionId)
         try
@@ -102,24 +99,36 @@ module EmbeddedServer =
 
                 let text = if isNull request.Text then "" else request.Text
                 let attachments = if isNull (box request.Attachments) then [||] else request.Attachments
-                let attachmentNames = attachments |> Array.map (fun a -> a.Name)
+                // Persist uploaded attachments into the session's file folder so the user can
+                // review or download them, and so the agent can read them on demand with the
+                // read_file tool. The attachment content is deliberately NOT placed into the
+                // prompt — the agent reads a file only when it actually needs the contents.
+                // Each upload is stored under a unique name so two attachments sharing a name
+                // don't clobber each other; we tell the agent the actual stored names.
+                let attachmentNames =
+                    if attachments.Length = 0 then [||]
+                    else
+                        let store = SessionFiles.forKey sessionId
+                        attachments
+                        |> Array.map (fun a ->
+                            try
+                                let saved = store.SaveText(a.Name, "upload", "", (if isNull a.Content then "" else a.Content), ensureUnique = true)
+                                saved.Name
+                            with _ -> a.Name)
                 let llmInput =
                     if attachments.Length = 0 then text
                     else
-                        let head = if String.IsNullOrWhiteSpace text then "" else text + "\n\n"
-                        let blocks =
-                            attachments
-                            |> Array.map (fun a ->
-                                sprintf "--- Attached file: %s ---\n%s" a.Name (if isNull a.Content then "" else a.Content))
-                            |> String.concat "\n\n"
-                        head + blocks
+                        let names = attachmentNames |> String.concat ", "
+                        let note =
+                            sprintf "[The user attached %d file(s), saved to the workspace: %s. The contents are not shown here — use the read_file tool with a file's name to read it, but only if you actually need its contents.]"
+                                attachments.Length names
+                        if String.IsNullOrWhiteSpace text then note else text + "\n\n" + note
 
-                let! augmented = knowledgeAugment llmInput
                 // Run the turn while streaming the in-progress steps to the client, so the UI
                 // can show "what's been done so far" live. We poll the grain's reentrant
                 // GetLiveStepsAsync (which interleaves with the running turn) and push an
                 // Event frame whenever a new step appears, then a final Done frame.
-                let processTask = session.ProcessWithContextAsync(augmented, text, attachmentNames)
+                let processTask = session.ProcessWithContextAsync(llmInput, text, attachmentNames)
                 let mutable lastCount = -1
                 while not processTask.IsCompleted do
                     let! _ = Task.WhenAny(processTask, Task.Delay(350))
@@ -540,12 +549,12 @@ module EmbeddedServer =
                         |> fun p -> Path.GetFullPath(Path.Combine(p, ".."))
                     else envPath
 
-                let model = if String.IsNullOrWhiteSpace(settings.Provider.Model) then "llama3.2" else settings.Provider.Model
-                let endpoint = if String.IsNullOrWhiteSpace(settings.Provider.Endpoint) then "http://localhost:11434" else settings.Provider.Endpoint
-
                 builder.Services.AddSingleton<ILlmProvider>(fun _ ->
-                    let config = { OllamaConfig.Default with Model = model; BaseUrl = endpoint }
-                    ProviderFactory.create (ProviderType.Ollama config)) |> ignore
+                    // Build the provider the user actually selected (Ollama / vLLM /
+                    // llama.cpp / OpenAI), defaulting blanks per provider, instead of
+                    // hard-coding Ollama.
+                    ProviderCatalog.toProviderType settings.Provider
+                    |> ProviderFactory.create) |> ignore
 
                 builder.Services.AddSingleton<IWorkspaceRegistry>(fun _ ->
                     let registry = WorkspaceRegistry()
@@ -555,23 +564,59 @@ module EmbeddedServer =
                 builder.Services.AddSingleton<IOrchestratorFactory>(fun _ ->
                     AssistantOrchestratorFactory(fun req -> confirmationHandler req) :> IOrchestratorFactory) |> ignore
 
-                // Conversation history persistence — file-based, grouped by session ID
-                let conversationsDir = Path.Combine(Database.dataDir, "conversations")
+                // All per-session data lives under .nao-data/sessions/<key>/ so everything
+                // about one conversation — its messages, files, observability traces and
+                // feedback — sits in a single folder, keyed by the sanitized grain key.
+                let sessionsRoot = Path.Combine(Database.dataDir, "sessions")
+
+                // Single event bus shared by every storage strategy. Producers (the grain,
+                // the agent harness) publish domain events; strategies subscribe / wrap and
+                // decide where data lands — swapping a strategy never touches a producer.
+                let eventBus = InMemoryEventBus() :> IEventBus
+
+                // Conversation history persistence — the file store writes to
+                // sessions/<key>/conversations/, wrapped in a PublishingConversationStore tee
+                // so every transcript WRITE is also broadcast as a ConversationCaptured event.
+                // Swapping FileConversationStore for a database/cloud store needs ZERO producer
+                // changes, and any subscriber can persist/forward the transcript stream.
                 builder.Services.AddSingleton<IConversationStore>(fun _ ->
-                    FileConversationStore(conversationsDir) :> IConversationStore) |> ignore
+                    PublishingConversationStore(eventBus, FileConversationStore(sessionsRoot))
+                    :> IConversationStore) |> ignore
 
-                // Observability + governance services injected into the SessionGrain harness.
-                // File-backed here for the desktop demo; swap to PersistenceMode.Database
-                // (or .InMemory for tests) to change where metrics/traces/audit/journal go.
-                let observabilityDir = Path.Combine(Database.dataDir, "observability")
-                builder.Services.AddSingleton<IHarnessServices>(fun _ ->
-                    Persistence.harnessServices (PersistenceMode.File observabilityDir)) |> ignore
+                // Observability storage via the event bus. The session strategy wraps a
+                // PER-SESSION backing bundle rooted at sessions/<key>/observability/ in a
+                // PublishingHarnessServices tee: every span/metric/journal/trace/audit WRITE
+                // is broadcast as an ObservabilityCaptured event while reads (regression
+                // baselines, revert history) still hit the real backing store. Swap it for
+                // CategoryObservabilityStrategy to share one folder — ZERO producer changes.
+                let observabilityStrategy : IObservabilityStorageStrategy =
+                    SessionObservabilityStrategy(eventBus, fun key ->
+                        let dir = Path.Combine(SessionFiles.sessionDir key, "observability")
+                        Persistence.harnessServices (PersistenceMode.File dir))
+                builder.Services.AddSingleton<Func<string, IHarnessServices>>(fun _ ->
+                    Func<string, IHarnessServices>(fun key -> observabilityStrategy.ServicesFor key)) |> ignore
 
-                // Feedback & adjust system — records turns, captures user feedback,
-                // and persists versioned tool patches that are overlaid at load time.
+                // Feedback storage via the event bus. The session strategy is BOTH the
+                // consumer (persists published TurnCompleted / ImplicitFeedbackCaptured events
+                // under sessions/<key>/feedback/) AND the read/command side the grain queries.
+                // Swap it for CategoryFeedbackStrategy to change the layout with ZERO producer
+                // changes — that is the whole point of routing through events.
+                let feedbackStrategy : IFeedbackStorageStrategy =
+                    SessionFeedbackStrategy(fun key -> Path.Combine(SessionFiles.sessionDir key, "feedback"))
+                eventBus.Subscribe(feedbackStrategy :> IEventConsumer)
+                builder.Services.AddSingleton<IEventBus>(eventBus) |> ignore
+                builder.Services.AddSingleton<Func<string, FeedbackService>>(fun _ ->
+                    Func<string, FeedbackService>(fun key -> feedbackStrategy.FeedbackFor key)) |> ignore
+
+                // Global feedback registry backing the management/enhancement HTTP endpoints
+                // (/api/annotations, /api/versions, /api/suggestions, /api/candidate).
                 let feedbackDir = Path.Combine(Database.dataDir, "feedback")
                 builder.Services.AddSingleton<FeedbackService>(fun _ ->
                     FeedbackService.File feedbackDir) |> ignore
+
+                // Async-task executors — matched by Kind on the SessionTaskGrain. Agent tasks
+                // drive a sub-session (e.g. the async converter agent runs its whole harness there).
+                builder.Services.AddSingleton<ITaskExecutor, AgentTaskExecutor>() |> ignore
 
                 let app = builder.Build()
                 app.UseWebSockets() |> ignore
@@ -635,22 +680,59 @@ module EmbeddedServer =
                     return Results.Ok({| proposals = rationales |})
                 })) |> ignore
 
+                // ─── Per-session files & async tasks ───
+                // The session key ("userId/sessionId") contains a slash, so it is always
+                // captured by the trailing catch-all route segment; the file/task id is
+                // passed as a query parameter.
+
+                // List the files stored for a session (uploads + tool/agent output).
+                app.MapGet("/api/sessions/files/{**id}", Func<string, _>(fun id -> task {
+                    let store = SessionFiles.forKey id
+                    return Results.Ok(store.List() |> List.toArray)
+                })) |> ignore
+
+                // Download a single session file by id (?fileId=...).
+                app.MapGet("/api/sessions/file/{**id}", Func<HttpContext, string, _>(fun ctx id -> task {
+                    let fileId = ctx.Request.Query.["fileId"].ToString()
+                    let store = SessionFiles.forKey id
+                    match store.TryOpen fileId with
+                    | Some(dto, bytes) ->
+                        let mt = if String.IsNullOrWhiteSpace dto.MediaType then "application/octet-stream" else dto.MediaType
+                        return Results.File(bytes, mt, dto.Name)
+                    | None -> return Results.NotFound()
+                })) |> ignore
+
+                // List the async tasks for a session (with live status/progress).
+                app.MapGet("/api/sessions/tasks/{**id}", Func<IGrainFactory, string, _>(fun grainFactory id -> task {
+                    let session = grainFactory.GetGrain<ISessionGrain>(id)
+                    let! tasks = session.ListTasksAsync()
+                    let dtos =
+                        tasks
+                        |> Array.map (fun (t: Nao.Runtime.Orleans.Grains.TaskRef) ->
+                            { Id = t.TaskId
+                              Kind = t.Kind
+                              Title = t.Title
+                              Status = t.Status
+                              Progress = t.Progress
+                              Message = t.Message
+                              ResultFileId = (if t.ResultFileIds.Count > 0 then t.ResultFileIds.[0] else "")
+                              Error = t.Error
+                              TurnId = t.TurnId
+                              CreatedAt = t.CreatedAt
+                              UpdatedAt = t.UpdatedAt } : TaskDto)
+                    return Results.Ok(dtos)
+                })) |> ignore
+
                 // Feedback / annotation / version / suggestion / candidate / register
                 // endpoints — shared with the standalone enhancement test host.
                 mapEnhancementEndpoints app workspaceRoot
 
                 // ─── Workspace knowledge base (RAG) ───
                 let knowledge = Knowledge.KnowledgeStore(workspaceRoot)
-                knowledgeAugment <- fun input -> task {
-                    let hits = knowledge.Retrieve input 4
-                    if List.isEmpty hits then return input
-                    else
-                        let ctxBlock =
-                            hits
-                            |> List.map (fun (f, t) -> sprintf "### From %s\n%s" f t)
-                            |> String.concat "\n\n"
-                        return sprintf "Relevant workspace knowledge:\n\n%s\n\n---\n\nUser question: %s" ctxBlock input
-                }
+                // The knowledge base is NOT injected into every message. It is exposed only
+                // through the search_knowledge tool, which the agent invokes on demand (after
+                // asking the user) to consult files the user explicitly uploaded.
+                AssistantTools.knowledgeSearch <- Some(fun query topK -> knowledge.Retrieve query topK)
 
                 app.MapGet("/api/knowledge", Func<HttpContext, _>(fun _ctx -> task {
                     return Results.Ok(knowledge.Files())

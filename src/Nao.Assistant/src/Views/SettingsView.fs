@@ -17,8 +17,22 @@ module SettingsView =
 
     type Msg =
         | SettingsChanged of AppSettings
+        // Granular appearance changes — each touches ONE field on the live model so the
+        // theme and language combos can never overwrite each other (a full-snapshot
+        // message built from a stale render closure used to revert the other setting).
+        | ThemeSelected of string
+        | LanguageSelected of string
+        // Switching provider also pre-fills that provider's default endpoint, so picking
+        // vLLM/llama.cpp/etc. "sets it up" without the user knowing each server's URL.
+        | ProviderTypeSelected of string
         | Save
         | Close
+
+    /// Native language display names — language-independent, so this list never changes
+    /// across renders. Bound as a STABLE module-level value so Avalonia never rebuilds the
+    /// language ComboBox's ItemsSource (which would transiently clear the selection).
+    let private languageNames : string list =
+        Localization.all |> List.map Localization.displayName
 
     /// Header row: title on the left, Close button on the right.
     let private header (dispatch: Msg -> unit) : IView =
@@ -43,24 +57,27 @@ module SettingsView =
     /// settings change, and persisted on Save.
     let private appearanceSection (dispatch: Msg -> unit) (s: AppSettings) : IView =
         let t = Localization.current ()
-        let change f = dispatch (SettingsChanged (f s))
         FormControls.section t.Appearance [
             FormControls.row t.Theme 120.0 [
                 ComboBox.create [
+                    // Bind by INDEX (0 = Dark, 1 = Light) so switching language — which
+                    // changes the localized item labels — does NOT reset the selection.
                     ComboBox.dataItems [ t.ThemeDark; t.ThemeLight ]
-                    ComboBox.selectedItem (box (if Theme.parse s.Theme = Theme.Light then t.ThemeLight else t.ThemeDark))
+                    ComboBox.selectedIndex (if Theme.parse s.Theme = Theme.Light then 1 else 0)
                     ComboBox.width 160.0
-                    ComboBox.onSelectedItemChanged (fun item ->
-                        match item with
-                        | :? string as v ->
-                            let theme = if v = t.ThemeLight then "Light" else "Dark"
-                            change (fun s -> { s with Theme = theme })
-                        | _ -> ())
+                    ComboBox.onSelectedIndexChanged (fun idx ->
+                        let theme = if idx = 1 then "Light" else "Dark"
+                        let current = if Theme.parse s.Theme = Theme.Light then "Light" else "Dark"
+                        if theme <> current then dispatch (ThemeSelected theme))
                 ]
             ]
             FormControls.row t.Language 120.0 [
                 ComboBox.create [
-                    ComboBox.dataItems (Localization.all |> List.map Localization.displayName)
+                    // Native names never change with the selected language, so bind the
+                    // SELECTED ITEM (by stable string value). Avalonia preserves the
+                    // selection by value across renders — unlike selectedIndex, which an
+                    // ItemsSource refresh can transiently reset to -1 (empty combo).
+                    ComboBox.dataItems languageNames
                     ComboBox.selectedItem (box (Localization.displayName (Localization.parse s.Language)))
                     ComboBox.width 160.0
                     ComboBox.onSelectedItemChanged (fun item ->
@@ -70,27 +87,57 @@ module SettingsView =
                                 Localization.all
                                 |> List.tryFind (fun l -> Localization.displayName l = name)
                                 |> Option.defaultValue Localization.English
-                            change (fun s -> { s with Language = Localization.code lang })
+                            if Localization.code lang <> Localization.code (Localization.parse s.Language) then
+                                dispatch (LanguageSelected (Localization.code lang))
                         | _ -> ())
                 ]
             ]
         ]
 
     let private providerSection (dispatch: Msg -> unit) (s: AppSettings) : IView =
+        let t = Localization.current ()
         let change f = dispatch (SettingsChanged (f s))
-        FormControls.section "LLM Provider" [
-            FormControls.textRow "Type:" 100.0 s.Provider.ProviderType 200.0 (fun v ->
-                change (fun s -> { s with Provider = { s.Provider with ProviderType = v } }))
-            FormControls.textRow "Endpoint:" 100.0 s.Provider.Endpoint 300.0 (fun v ->
+        FormControls.section t.LlmProvider [
+            // A dropdown of the providers we actually support, so the type can never be an
+            // invalid free-text value. Bound by stable label string (like the language
+            // combo) so re-renders never transiently clear the selection.
+            FormControls.row t.FieldType 100.0 [
+                ComboBox.create [
+                    ComboBox.dataItems ProviderCatalog.labels
+                    ComboBox.selectedItem (box (ProviderCatalog.labelFor s.Provider.ProviderType))
+                    ComboBox.width 200.0
+                    ComboBox.onSelectedItemChanged (fun item ->
+                        match item with
+                        | :? string as label ->
+                            let id = ProviderCatalog.idForLabel label
+                            if id <> s.Provider.ProviderType then dispatch (ProviderTypeSelected id)
+                        | _ -> ())
+                ]
+            ]
+            FormControls.textRow t.FieldEndpoint 100.0 s.Provider.Endpoint 300.0 (fun v ->
                 change (fun s -> { s with Provider = { s.Provider with Endpoint = v } }))
-            FormControls.textRow "Model:" 100.0 s.Provider.Model 200.0 (fun v ->
-                change (fun s -> { s with Provider = { s.Provider with Model = v } }))
+            // A dropdown of known models for the selected provider, so the model can never
+            // be an arbitrary/typo'd value. Bound by stable label string like the type combo.
+            FormControls.row t.FieldModel 100.0 [
+                ComboBox.create [
+                    ComboBox.dataItems (ProviderCatalog.modelsFor s.Provider.ProviderType)
+                    ComboBox.selectedItem (box s.Provider.Model)
+                    ComboBox.width 200.0
+                    ComboBox.onSelectedItemChanged (fun item ->
+                        match item with
+                        | :? string as v ->
+                            if v <> s.Provider.Model then
+                                change (fun s -> { s with Provider = { s.Provider with Model = v } })
+                        | _ -> ())
+                ]
+            ]
         ]
 
     let private orchestratorSection (dispatch: Msg -> unit) (s: AppSettings) : IView =
+        let t = Localization.current ()
         let change f = dispatch (SettingsChanged (f s))
-        FormControls.section "Orchestrator" [
-            FormControls.row "Max Rounds:" 120.0 [
+        FormControls.section t.Orchestrator [
+            FormControls.row t.MaxRounds 120.0 [
                 NumericUpDown.create [
                     NumericUpDown.value (decimal s.Orchestrator.MaxRounds)
                     NumericUpDown.minimum 1M
@@ -102,7 +149,7 @@ module SettingsView =
                             change (fun s -> { s with Orchestrator = { s.Orchestrator with MaxRounds = int v.Value } }))
                 ]
             ]
-            FormControls.row "Temperature:" 120.0 [
+            FormControls.row t.Temperature 120.0 [
                 NumericUpDown.create [
                     NumericUpDown.value (decimal s.Orchestrator.Temperature)
                     NumericUpDown.minimum 0M
@@ -114,7 +161,7 @@ module SettingsView =
                             change (fun s -> { s with Orchestrator = { s.Orchestrator with Temperature = float v.Value } }))
                 ]
             ]
-            FormControls.row "Window:" 120.0 [
+            FormControls.row t.ContextWindow 120.0 [
                 ComboBox.create [
                     ComboBox.dataItems [ "LastN"; "TokenBudget"; "SummarizeAfter" ]
                     ComboBox.selectedItem (box s.Orchestrator.WindowStrategy)
@@ -137,7 +184,7 @@ module SettingsView =
                 ]
             ]
             TextBlock.create [
-                TextBlock.text "System Prompt:"
+                TextBlock.text t.SystemPrompt
                 TextBlock.margin (0.0, 4.0, 0.0, 0.0)
             ]
             TextBox.create [
@@ -151,18 +198,18 @@ module SettingsView =
         ]
 
     let private workspaceSection (dispatch: Msg -> unit) (s: AppSettings) : IView =
-        FormControls.section "Workspace" [
-            FormControls.row "Path:" 100.0 [
+        let t = Localization.current ()
+        FormControls.section t.Workspace [
+            FormControls.row t.PathLabel 100.0 [
                 TextBox.create [
                     TextBox.text s.WorkspacePath
                     TextBox.width 350.0
-                    TextBox.watermark "Path to .nao workspace folder"
+                    TextBox.watermark t.WorkspaceWatermark
                     TextBox.onTextChanged (fun v ->
                         dispatch (SettingsChanged { s with WorkspacePath = v }))
                 ]
             ]
-            FormControls.hint
-                "Place an orchestrator.json in .nao/ folder to override orchestrator settings per workspace."
+            FormControls.hint t.WorkspaceHint
         ]
 
     /// Footer row: status message on the left, Save button on the right.

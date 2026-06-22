@@ -1,6 +1,7 @@
 namespace Nao.Runtime.Orleans.Grains
 
 open System
+open System.Text.Json
 open System.Threading.Tasks
 open Orleans
 open Orleans.Runtime
@@ -8,6 +9,7 @@ open Nao.Core
 open Nao.Agents
 open Nao.Loader
 open Nao.Feedback
+open Nao.Events
 open Nao.Runtime.Orleans
 
 // Allow the Orleans C# codegen project to access internal F# DU backing fields.
@@ -34,6 +36,12 @@ type SessionInfo() =
     /// Runtime policy for launching tools ("" = host default; "docker"/"docker:&lt;image&gt;"
     /// to containerize; a runtime name like "deno" to force it for all tools).
     [<Id(12u)>] member val RuntimeMode: string = "" with get, set
+    /// Session kind: "primary" (a user session) or "task" (a sub-session driven by a task).
+    [<Id(13u)>] member val Kind: string = "primary" with get, set
+    /// Owning session key for a task sub-session ("" for a primary session).
+    [<Id(14u)>] member val ParentKey: string = "" with get, set
+    /// Task that spawned this sub-session ("" for a primary session).
+    [<Id(15u)>] member val OriginTaskId: string = "" with get, set
 
 /// A named conversation context within a session
 [<GenerateSerializer>]
@@ -49,6 +57,8 @@ type SessionGrainState() =
     [<Id(0u)>] member val Info: SessionInfo = SessionInfo() with get, set
     [<Id(1u)>] member val Conversations: ResizeArray<ConversationContext> = ResizeArray() with get, set
     [<Id(2u)>] member val Memories: ResizeArray<MemoryRecord> = ResizeArray() with get, set
+    /// Async tasks launched by this session (snapshots pushed from each task grain).
+    [<Id(3u)>] member val Tasks: ResizeArray<TaskRef> = ResizeArray() with get, set
 
 /// Options for starting or reconfiguring a session
 [<GenerateSerializer>]
@@ -62,6 +72,10 @@ type SessionStartOptions() =
     /// Runtime policy for launching tools ("" = host default; "docker"/"docker:&lt;image&gt;"
     /// to containerize; a runtime name like "deno" to force it for all tools).
     [<Id(5u)>] member val RuntimeMode: string = "" with get, set
+    /// Session kind: "primary" (default) or "task" for a task sub-session.
+    [<Id(6u)>] member val Kind: string = "primary" with get, set
+    /// Owning session key when starting a task sub-session.
+    [<Id(7u)>] member val ParentKey: string = "" with get, set
 
 /// Orleans grain interface for a user session.
 /// Grain key format: "userId/sessionId"
@@ -133,6 +147,15 @@ type ISessionGrain =
     /// Permanently destroy the session and all its data
     abstract member DestroyAsync: unit -> Task
 
+    /// Upsert an async-task snapshot into this session's tracked task list. Called by the
+    /// owning task grain on each status transition (push model).
+    abstract member UpdateTaskStatusAsync: task: TaskRef -> Task
+
+    /// List all async tasks tracked by this session (newest first). Reentrant so a live UI
+    /// can poll it while a turn is still running.
+    [<Orleans.Concurrency.AlwaysInterleave>]
+    abstract member ListTasksAsync: unit -> Task<TaskRef array>
+
 /// Self-contained session grain. Resolves workspaces from IWorkspaceRegistry,
 /// manages multiple conversation contexts and memory through Orleans persistence.
 ///
@@ -153,8 +176,10 @@ type SessionGrain
         provider: ILlmProvider,
         orchestratorFactory: IOrchestratorFactory,
         conversationStore: IConversationStore,
-        harnessServices: IHarnessServices,
-        feedback: FeedbackService
+        harnessServicesFactory: Func<string, IHarnessServices>,
+        feedbackFactory: Func<string, FeedbackService>,
+        eventBus: IEventBus,
+        grainFactory: IGrainFactory
     ) =
     inherit Grain()
 
@@ -163,11 +188,27 @@ type SessionGrain
     /// through `recorder.Steps`, which is internally lock-protected.
     let mutable currentRecorder : TurnRecorder option = None
 
+    /// Per-session services, resolved once from the grain key in OnActivateAsync so this
+    /// session's observability traces and feedback are written under sessions/<key>/.
+    let mutable harnessServices : IHarnessServices = HarnessServices.none
+    let mutable feedback : FeedbackService = Unchecked.defaultof<FeedbackService>
+
     // ─── Workspace resolution ───
 
     let getWorkspace () : WorkspaceDefinitions option =
         let key = WorkspaceId.create persistentState.State.Info.WorkspaceKey
         registry.TryGet key
+
+    /// Build the identity envelope carried by every emitted event. `actionId` is the turn
+    /// the event is about. Producers never decide where data lands — a subscribed storage
+    /// strategy routes it (per session, per category, ...) from this scope.
+    let makeScope (actionId: string) : EventScope =
+        let info = persistentState.State.Info
+        let sessionKey = sprintf "%s/%s" info.UserId info.SessionId
+        EventScope.Create(
+            info.UserId, info.SessionId, info.ActiveConversation, info.WorkspaceKey,
+            actionId, sessionKey,
+            ?parentKey = (if String.IsNullOrEmpty info.ParentKey then None else Some info.ParentKey))
 
     let buildHarnessConfig (workspace: WorkspaceDefinitions) (tools: Tool list) (eventSink: IAgentEventSink) : EtclovgConfig =
         let constitution = DefinitionBuilder.buildMergedConstitution workspace.ConstitutionDefs
@@ -246,6 +287,37 @@ type SessionGrain
                          Timestamp = now; TurnId = turnId
                          Steps = stepRecords |> List.toArray; Attachments = [||] } |]
                 do! conversationStore.AppendAsync grainKey convName persisted
+        }
+
+    // ─── Async task tracking ───
+
+    /// Insert or replace a task snapshot in the session's tracked task list (by id).
+    let upsertTaskRef (ref: TaskRef) =
+        match persistentState.State.Tasks |> Seq.tryFindIndex (fun t -> t.TaskId = ref.TaskId) with
+        | Some i -> persistentState.State.Tasks.[i] <- ref
+        | None -> persistentState.State.Tasks.Insert(0, ref)
+
+    /// Create + start a task grain (key "userId/sessionId/taskId"), track it locally, and
+    /// return the registered snapshot. The task runs in the background on its own grain.
+    let spawnTaskAsync (kind: string) (title: string) (paramz: (string * string) list) (turnId: string) : Task<TaskRef> =
+        task {
+            let info = persistentState.State.Info
+            let parentKey = sprintf "%s/%s" info.UserId info.SessionId
+            let taskId = Guid.NewGuid().ToString("N").[..11]
+            let subKey = sprintf "%s/%s" parentKey taskId
+            let paramsJson = JsonSerializer.Serialize(dict paramz)
+            let now = DateTimeOffset.UtcNow
+            let ref =
+                TaskRef(TaskId = taskId, Kind = kind, Title = title, Status = "pending",
+                        SubSessionKey = subKey, TurnId = turnId, CreatedAt = now, UpdatedAt = now)
+            upsertTaskRef ref
+            let grain = grainFactory.GetGrain<ISessionTaskGrain>(subKey)
+            let spec =
+                TaskStartSpec(TaskId = taskId, ParentKey = parentKey, Kind = kind,
+                              Title = title, ParamsJson = paramsJson, TurnId = turnId)
+            let! started = grain.StartAsync(spec)
+            upsertTaskRef started
+            return started
         }
 
     // ─── Tool resolution ───
@@ -327,8 +399,20 @@ type SessionGrain
             let priorTurnId = persistentState.State.Info.LastTurnId
             if not (String.IsNullOrEmpty priorTurnId) then
                 let info = persistentState.State.Info
-                match! feedback.CaptureImplicitFeedbackAsync(priorTurnId, info.SessionId, info.UserId, displayText) with
-                | Some fb ->
+                match ConversationFeedback.detect displayText with
+                | Some(sentiment, comment) ->
+                    let fb =
+                        { Id = Guid.NewGuid()
+                          TurnId = priorTurnId
+                          SessionId = info.SessionId
+                          UserId = info.UserId
+                          Sentiment = sentiment
+                          Comment = Some comment
+                          CreatedAt = DateTimeOffset.UtcNow
+                          Metadata = Map.empty |> FeedbackSource.stamp FeedbackSource.Conversation }
+                    // The producer only emits — a subscribed storage strategy decides where
+                    // the feedback is persisted (per session, per category, ...).
+                    do! eventBus.PublishAsync(ImplicitFeedbackCaptured(makeScope priorTurnId, fb))
                     let note =
                         sprintf "%A feedback on turn %s: %s"
                             fb.Sentiment priorTurnId (fb.Comment |> Option.defaultValue "")
@@ -346,14 +430,58 @@ type SessionGrain
                 return sprintf "[Error] Workspace '%s' not available" persistentState.State.Info.WorkspaceKey
             | Some workspace ->
 
+            let agentVersion = versionOpt persistentState.State.Info.AgentVersion
+            let info = persistentState.State.Info
+
+            // Agent-level async: when the resolved agent is flagged async — and we are not
+            // already executing inside a task's own sub-session — run the whole turn as a
+            // spawned background task and return a token immediately, instead of blocking on
+            // the harness. The sub-session runs the same agent inline (its Kind = "task").
+            let isAsyncAgent =
+                info.Kind <> "task"
+                && (match findAgentDef workspace agentName agentVersion with
+                    | Some def -> def.IsAsync
+                    | None -> false)
+
+            if isAsyncAgent then
+                let turnId = Guid.NewGuid().ToString("N")
+                let title = sprintf "Async run: %s" agentName
+                // The spawned agent runs in a fresh sub-session that shares none of this
+                // conversation's history, so prefix the recent transcript onto its input —
+                // otherwise a follow-up like "convert it to html" has no idea what "it" is.
+                let contextualInput =
+                    ConversationContextRender.withHistory 8 (activeConversation().Messages) llmInput
+                let! taskRef = spawnTaskAsync "agent" title [ "agent", agentName; "input", contextualInput ] turnId
+                let tokenMsg =
+                    sprintf "Started background task **%s** (`%s`). Track its progress or open the result from the task tag."
+                        taskRef.Title taskRef.TaskId
+                do! appendTurnAsync displayText attachmentNames tokenMsg turnId []
+                info.LastTurnId <- turnId
+                info.LastActiveAt <- DateTimeOffset.UtcNow
+                do! persistentState.WriteStateAsync()
+                return tokenMsg
+            else
+
             let tools = resolveTools workspace (RuntimePolicy.parse persistentState.State.Info.RuntimeMode) (persistentState.State.Info.ToolNames |> Seq.toList)
+
+            // Scope the resolved tools to the ones the agent actually declares. The session's
+            // ToolNames is a broad pool; an agent definition narrows it so a tool not listed
+            // on the agent is off-limits to it (e.g. convert_document is reserved for the
+            // converter agent and must not be callable by the generalist orchestrator).
+            let tools =
+                match findAgentDef workspace agentName agentVersion with
+                | Some def when not (List.isEmpty def.Tools) ->
+                    let allowed =
+                        def.Tools
+                        |> List.map (fun t -> let (n, _) = VersionRef.parse t in n)
+                        |> Set.ofList
+                    tools |> List.filter (fun t -> allowed.Contains t.Name)
+                | _ -> tools
 
             // Overlay any active feedback annotations so user-improved tool behaviour
             // takes effect transparently at load time (dropping them reverts to legacy).
             let! tools = feedback.ApplyToolAnnotationsAsync tools
 
-            let agentVersion = versionOpt persistentState.State.Info.AgentVersion
-            let info = persistentState.State.Info
             let turnId = Guid.NewGuid().ToString("N")
             // The recorder must exist before the agent is built so it can be wired as the
             // orchestrator's event sink and capture the whole execution (rounds, tool
@@ -365,6 +493,32 @@ type SessionGrain
             // Expose this turn's recorder so GetLiveStepsAsync can stream progress while
             // the harness runs; always clear it once the turn finishes (success or not).
             currentRecorder <- Some recorder
+            // Flow the session/turn identity into the async context so tools that produce
+            // files or spawn background tasks can attribute their output to this session.
+            // SpawnTask lets a tool launch a grain-backed background task from inside the
+            // harness without re-entering this (the primary) grain.
+            let sessionKey = sprintf "%s/%s" info.UserId info.SessionId
+            // Agents flagged async: the orchestrator spawns a background task when delegating
+            // to one of these instead of running it inline (which would lack its own tools).
+            let asyncAgentNames =
+                workspace.AgentDefs
+                |> List.filter (fun d -> d.IsAsync)
+                |> List.map (fun d -> d.Name)
+                |> Set.ofList
+            // A task sub-session works inside its parent's file folder so the input the user
+            // attached and the files the task generates are shared with their conversation.
+            let filesKey =
+                if info.Kind = "task" && not (String.IsNullOrEmpty info.ParentKey) then info.ParentKey
+                else sessionKey
+            SessionExecution.set
+                { SessionKey = sessionKey
+                  FilesKey = filesKey
+                  AsyncAgents = asyncAgentNames
+                  TurnId = turnId
+                  SpawnTask = fun spec ->
+                      task {
+                          let! taskRef = spawnTaskAsync spec.Kind spec.Title (spec.Params |> Map.toList) turnId
+                          return taskRef.TaskId } }
             try
                 let! agentOpt = createAgentAsync workspace agentName agentVersion tools (recorder :> IAgentEventSink)
                 match agentOpt with
@@ -376,9 +530,10 @@ type SessionGrain
 
                     match result.Success, result.Response with
                     | true, Some response ->
-                        // Record the turn so feedback can later be analysed against it.
+                        // Emit the completed turn; a subscribed storage strategy persists it
+                        // so feedback can later be analysed against it.
                         let turnRecord = { recorder.Snapshot() with Output = response }
-                        do! feedback.RecordTurnAsync turnRecord
+                        do! eventBus.PublishAsync(TurnCompleted(makeScope turnId, turnRecord))
 
                         // Persist a CLEAN, user-facing transcript: the display text (no embedded
                         // attachment content) plus one assistant message carrying the process.
@@ -397,7 +552,17 @@ type SessionGrain
                         return errorMsg
             finally
                 currentRecorder <- None
+                SessionExecution.clear ()
         }
+    // ─── Activation ───
+
+    /// Resolve this session's per-session observability and feedback stores from the grain
+    /// key ("userId/sessionId") so each session writes them under its own sessions/<key>/.
+    override this.OnActivateAsync(cancellationToken: System.Threading.CancellationToken) : Task =
+        let key = this.GetPrimaryKeyString()
+        harnessServices <- harnessServicesFactory.Invoke key
+        feedback <- feedbackFactory.Invoke key
+        base.OnActivateAsync(cancellationToken)
 
     // ─── Interface implementation ───
 
@@ -433,6 +598,8 @@ type SessionGrain
                     info.IsActive <- true
                     info.ToolNames <- ResizeArray(options.ToolNames)
                     info.RuntimeMode <- options.RuntimeMode
+                    info.Kind <- (if String.IsNullOrEmpty options.Kind then "primary" else options.Kind)
+                    info.ParentKey <- options.ParentKey
                     info.ActiveConversation <- "default"
                     if info.CreatedAt = DateTimeOffset.MinValue then
                         info.CreatedAt <- DateTimeOffset.UtcNow
@@ -615,6 +782,18 @@ type SessionGrain
                 do! persistentState.ClearStateAsync()
                 this.DeactivateOnIdle()
             }
+
+        member _.UpdateTaskStatusAsync(taskRef: TaskRef) : Task =
+            task {
+                upsertTaskRef taskRef
+                do! persistentState.WriteStateAsync()
+            }
+
+        member _.ListTasksAsync() : Task<TaskRef array> =
+            persistentState.State.Tasks
+            |> Seq.sortByDescending (fun t -> t.CreatedAt)
+            |> Seq.toArray
+            |> Task.FromResult
 
 module SessionGrain =
 

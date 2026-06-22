@@ -70,7 +70,10 @@ module Shell =
                                       SessionView.AvailableAgents = []
                                       SessionView.SelectedAgent = "nao-assistant"
                                       SessionView.AgentsLoaded = false
-                                      SessionView.AttachedFile = None } : SessionView.SessionState)
+                                      SessionView.AttachedFile = None
+                                      SessionView.Files = []
+                                      SessionView.Tasks = []
+                                      SessionView.FilesPanelOpen = false } : SessionView.SessionState)
                             else
                                 [ SessionView.createNew () ]
 
@@ -193,6 +196,40 @@ module Shell =
 
         | SettingsMsg settingsMsg ->
             match settingsMsg with
+            | SettingsView.ThemeSelected theme ->
+                // Granular, single-field update on the LIVE model — never touches Language.
+                Theme.apply (Theme.parse theme)
+                { model with
+                    SettingsState =
+                        { model.SettingsState with
+                            Settings = { model.SettingsState.Settings with Theme = theme }
+                            IsDirty = true } },
+                Cmd.none
+            | SettingsView.LanguageSelected lang ->
+                // Granular, single-field update on the LIVE model — never touches Theme.
+                Localization.apply (Localization.parse lang)
+                { model with
+                    SettingsState =
+                        { model.SettingsState with
+                            Settings = { model.SettingsState.Settings with Language = lang }
+                            IsDirty = true } },
+                Cmd.none
+            | SettingsView.ProviderTypeSelected providerId ->
+                // Picking a provider also "sets it up" by pre-filling that provider's
+                // default endpoint and a valid default model, so the user doesn't need to
+                // know each server's URL and the model dropdown is never left mismatched.
+                let current = model.SettingsState.Settings.Provider
+                let provider =
+                    { current with
+                        ProviderType = providerId
+                        Endpoint = ProviderCatalog.defaultEndpointFor providerId
+                        Model = ProviderCatalog.defaultModelFor providerId }
+                { model with
+                    SettingsState =
+                        { model.SettingsState with
+                            Settings = { model.SettingsState.Settings with Provider = provider }
+                            IsDirty = true } },
+                Cmd.none
             | SettingsView.SettingsChanged newSettings ->
                 // Apply appearance immediately so the theme/language toggle is live.
                 Theme.apply (Theme.parse newSettings.Theme)
@@ -337,7 +374,7 @@ module Shell =
                             StackPanel.width 320.0
                             StackPanel.children [
                                 TextBlock.create [
-                                    TextBlock.text "Starting local server..."
+                                    TextBlock.text (Localization.current ()).StartingServer
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
                                     TextBlock.foreground Theme.textPrimary
                                     TextBlock.fontSize 16.0
@@ -347,7 +384,7 @@ module Shell =
                                     ProgressBar.isIndeterminate true
                                 ]
                                 TextBlock.create [
-                                    TextBlock.text "Preparing sessions and runtime"
+                                    TextBlock.text (Localization.current ()).PreparingRuntime
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
                                     TextBlock.foreground Theme.textSecondary
                                 ]
@@ -366,7 +403,7 @@ module Shell =
                             StackPanel.width 520.0
                             StackPanel.children [
                                 TextBlock.create [
-                                    TextBlock.text "Server failed to start"
+                                    TextBlock.text (Localization.current ()).ServerFailed
                                     TextBlock.foreground Theme.textPrimary
                                     TextBlock.fontSize 18.0
                                     TextBlock.horizontalAlignment HorizontalAlignment.Center
@@ -377,7 +414,7 @@ module Shell =
                                     SelectableTextBlock.textWrapping TextWrapping.Wrap
                                 ]
                                 Button.create [
-                                    Button.content "Retry"
+                                    Button.content (Localization.current ()).Retry
                                     Button.horizontalAlignment HorizontalAlignment.Center
                                     Button.onClick (fun _ ->
                                         dispatch RetryStartup)
@@ -412,7 +449,7 @@ module Shell =
                                         SessionView.view (fun m -> dispatch (SessionMsg (idx, m))) model.Sessions.[idx]
                                     else
                                         TextBlock.create [
-                                            TextBlock.text "No session selected"
+                                            TextBlock.text (Localization.current ()).NoSessionSelected
                                             TextBlock.horizontalAlignment HorizontalAlignment.Center
                                             TextBlock.verticalAlignment VerticalAlignment.Center
                                         ]

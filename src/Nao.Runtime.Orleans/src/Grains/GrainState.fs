@@ -59,3 +59,36 @@ module GrainStateMapping =
           Value = entry.Value
           Timestamp = entry.Timestamp
           Tags = entry.Tags }
+
+/// Render recent conversation transcript for a spawned async agent. An async agent runs
+/// in a brand-new sub-session that shares none of the parent conversation's history, so
+/// without this a follow-up like "convert it to html" arrives with no idea what "it" is.
+/// We surface the recent turns (and any attachment names, which are usually the subject of
+/// the follow-up) so the agent can resolve the reference.
+module ConversationContextRender =
+
+    /// The last `maxMessages` messages rendered as "Role: content [attached: a, b]" lines.
+    /// Returns "" when there is no prior history.
+    let recentTranscript (maxMessages: int) (messages: MessageRecord seq) : string =
+        let msgs = messages |> Seq.toList
+        let recent =
+            if maxMessages > 0 && msgs.Length > maxMessages then
+                msgs |> List.skip (msgs.Length - maxMessages)
+            else msgs
+        recent
+        |> List.map (fun m ->
+            let atts =
+                if not (isNull m.Attachments) && m.Attachments.Count > 0 then
+                    sprintf " [attached: %s]" (String.Join(", ", m.Attachments))
+                else ""
+            sprintf "%s: %s%s" m.Role m.Content atts)
+        |> fun lines -> String.Join("\n", lines)
+
+    /// Prefix `input` with the recent transcript so the agent has conversational context.
+    /// When there is no prior history the input is returned unchanged.
+    let withHistory (maxMessages: int) (messages: MessageRecord seq) (input: string) : string =
+        let transcript = recentTranscript maxMessages messages
+        if String.IsNullOrWhiteSpace transcript then input
+        else
+            sprintf "Conversation so far (for context — the new request is at the end):\n%s\n\nNew request:\n%s"
+                transcript input

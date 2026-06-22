@@ -24,11 +24,14 @@ module FeedbackDialog =
           OnSubmit: unit -> unit }
 
     let render (props: Props) : IView =
+        let t = Localization.current ()
         let isPositive = props.Sentiment = "positive"
-        let header = if isPositive then "\U0001F44D Positive feedback" else "\U0001F44E Negative feedback"
+        let header =
+            if isPositive then sprintf "\U0001F44D %s" t.FeedbackPositiveHeader
+            else sprintf "\U0001F44E %s" t.FeedbackNegativeHeader
         let prompt =
-            if isPositive then "What did you like about this response?"
-            else "What could have been better?"
+            if isPositive then t.FeedbackPositivePrompt
+            else t.FeedbackNegativePrompt
         Border.create [
             Border.background (SolidColorBrush(Color.Parse("#B3000000")))
             Border.child (
@@ -57,13 +60,13 @@ module FeedbackDialog =
                                     TextBlock.foreground Theme.textPrimary
                                 ]
                                 TextBlock.create [
-                                    TextBlock.text "Optional \u2014 add a comment to explain your rating."
+                                    TextBlock.text t.FeedbackCommentHint
                                     TextBlock.fontSize 11.0
                                     TextBlock.foreground Theme.textMuted
                                 ]
                                 TextBox.create [
                                     TextBox.text props.Comment
-                                    TextBox.watermark "Tell us more (optional)..."
+                                    TextBox.watermark t.FeedbackCommentPlaceholder
                                     TextBox.acceptsReturn true
                                     TextBox.textWrapping TextWrapping.Wrap
                                     TextBox.height 96.0
@@ -76,12 +79,12 @@ module FeedbackDialog =
                                     StackPanel.spacing 8.0
                                     StackPanel.children [
                                         Button.create [
-                                            Button.content "Cancel"
+                                            Button.content t.Cancel
                                             Button.isEnabled (not props.Submitting)
                                             Button.onClick (fun _ -> props.OnCancel ())
                                         ]
                                         Button.create [
-                                            Button.content (if props.Submitting then "Sending..." else "Submit")
+                                            Button.content (if props.Submitting then t.Sending else t.Submit)
                                             Button.isEnabled (not props.Submitting)
                                             Button.onClick (fun _ -> props.OnSubmit ())
                                         ]

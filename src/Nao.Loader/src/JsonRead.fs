@@ -29,6 +29,12 @@ module JsonRead =
         | true, v when v.ValueKind = JsonValueKind.Number -> v.GetInt32()
         | _ -> defaultVal
 
+    let internal boolVal (elem: JsonElement) (prop: string) (defaultVal: bool) =
+        match elem.TryGetProperty(prop) with
+        | true, v when v.ValueKind = JsonValueKind.True -> true
+        | true, v when v.ValueKind = JsonValueKind.False -> false
+        | _ -> defaultVal
+
     let internal intOpt (elem: JsonElement) (prop: string) =
         match elem.TryGetProperty(prop) with
         | true, v when v.ValueKind = JsonValueKind.Number -> Some (v.GetInt32())
@@ -124,6 +130,7 @@ module JsonRead =
           SubAgents = strArray elem "sub_agents"
           Options = completionOptions optionsElem
           MaxRounds = intVal elem "max_rounds" 5
+          IsAsync = boolVal elem "async" false
           Provenance = None }
 
     let private toolExecution (elem: JsonElement) (prefix: string) : ToolExecutionDef option =
@@ -212,12 +219,6 @@ module JsonRead =
           Agent = str elem "agent"
           Evaluator = evaluatorRef evaluatorElem
           Cases = objArray elem "cases" |> List.map evalCase }
-
-    let internal boolVal (elem: JsonElement) (prop: string) (defaultVal: bool) =
-        match elem.TryGetProperty(prop) with
-        | true, v when v.ValueKind = JsonValueKind.True -> true
-        | true, v when v.ValueKind = JsonValueKind.False -> false
-        | _ -> defaultVal
 
     let constitutionRuleDef (elem: JsonElement) : ConstitutionRuleDef =
         { Id = str elem "id"
